@@ -12,6 +12,9 @@ import subprocess
 import threading
 import webbrowser
 import time
+import urllib.request
+import urllib.parse
+import urllib.error
 from collections import defaultdict
 from datetime import datetime
 from io import BytesIO
@@ -79,6 +82,10 @@ scan_stats = {
     "phase": "idle",
     "phase_detail": "",
 }
+
+# Immich Mapping: {absolute_path: {"id": asset_id, "lib_path": path_in_immich}}
+immich_asset_map = {}
+immich_sync_status = {"status": "idle", "last_sync": None, "total_assets": 0, "mapped_count": 0}
 
 # ---------------------------------------------------------------------------
 # Deletion history persistence
@@ -182,13 +189,6 @@ def format_size(size_bytes):
 
 def is_within_root(path):
     """Security check: ensure the path is under ROOT_DIR."""
-    try:
-        real = os.path.realpath(path)
-        root = os.path.realpath(ROOT_DIR)
-        return real.startswith(root + os.sep) or real == root
-    except Exception:
-        return False
-
 
 def get_thumb_filename(path):
     path_hash = hashlib.md5(path.encode()).hexdigest()[:12]
@@ -846,6 +846,7 @@ def api_groups():
                     "type": fi["type"],
                     "thumbnail": get_thumb_filename(fi["path"]),
                     "folder": os.path.dirname(fi["path"]),
+                    "is_immich": os.path.abspath(fi["path"]) in immich_asset_map
                 }
                 for fi in files
             ],
@@ -901,12 +902,31 @@ def api_delete():
                     kept_versions.append(f["path"])
             break
 
-    ok, err = move_to_trash(path)
+    ok, err = False, "Deletion failed"
+    used_immich = False
+    immich_info = immich_asset_map.get(os.path.abspath(path))
+    
+    if _settings.get("immich_enabled") and immich_info:
+        # Attempt Immich deletion
+        _, immich_err = immich_client.delete_assets([immich_info["id"]])
+        if not immich_err:
+            used_immich = True
+            ok = True
+            # Also ensure filesystem bit is gone just in case Immich didn't delete the physical file
+            if os.path.exists(path):
+                move_to_trash(path)
+        else:
+            return jsonify({"success": False, "error": f"Immich Error: {immich_err}"}), 400
+    else:
+        ok, err = move_to_trash(path)
+
     if not ok:
         return jsonify({"success": False, "error": err}), 400
 
     remove_file_from_duplicates(path)
     remove_file_from_index(path)
+    if os.path.abspath(path) in immich_asset_map:
+        del immich_asset_map[os.path.abspath(path)]
 
     # Record in history
     deletion_history["total_space_saved"] += size
@@ -917,12 +937,14 @@ def api_delete():
     else:
         deletion_history["total_images_deleted"] = deletion_history.get("total_images_deleted", 0) + 1
         deletion_history["space_saved_images"] = deletion_history.get("space_saved_images", 0) + size
+    
     deletion_history["deletions"].append({
         "path": path,
         "size": size,
         "size_human": format_size(size),
         "timestamp": datetime.now().isoformat(),
-        "kept_versions": kept_versions
+        "kept_versions": kept_versions,
+        "immich_deleted": used_immich
     })
     save_history(deletion_history)
 
@@ -951,7 +973,23 @@ def api_delete_batch():
         except OSError:
             pass
 
-        ok, err = move_to_trash(path)
+        ok, err = False, "Deletion failed"
+        used_immich = False
+        immich_info = immich_asset_map.get(os.path.abspath(path))
+
+        if _settings.get("immich_enabled") and immich_info:
+            _, immich_err = immich_client.delete_assets([immich_info["id"]])
+            if not immich_err:
+                used_immich = True
+                ok = True
+                if os.path.exists(path):
+                    move_to_trash(path)
+            else:
+                results.append({"path": path, "success": False, "error": f"Immich Error: {immich_err}"})
+                continue
+        else:
+            ok, err = move_to_trash(path)
+
         if ok:
             # Find kept versions for this specific file
             kept_versions = []
@@ -964,6 +1002,9 @@ def api_delete_batch():
 
             remove_file_from_duplicates(path)
             remove_file_from_index(path)
+            if os.path.abspath(path) in immich_asset_map:
+                del immich_asset_map[os.path.abspath(path)]
+
             deletion_history["total_space_saved"] += size
             ext = os.path.splitext(path)[1].lower()
             if ext in VIDEO_EXTS:
@@ -977,7 +1018,8 @@ def api_delete_batch():
                 "size": size,
                 "size_human": format_size(size),
                 "timestamp": datetime.now().isoformat(),
-                "kept_versions": kept_versions
+                "kept_versions": kept_versions,
+                "immich_deleted": used_immich
             })
             total_freed += size
             results.append({"path": path, "success": True})
@@ -1075,6 +1117,7 @@ def api_folder_rules():
                 "size_human": format_size(f["size"]),
                 "type": f["type"],
                 "thumbnail": get_thumb_filename(f["path"]),
+                "is_immich": os.path.abspath(f["path"]) in immich_asset_map
             })
 
         return jsonify({
@@ -1194,7 +1237,8 @@ def api_small_files():
             "size": f["size"],
             "size_human": format_size(f["size"]),
             "type": f["type"],
-            "thumbnail": get_thumb_filename(f["path"])
+            "thumbnail": get_thumb_filename(f["path"]),
+            "is_immich": os.path.abspath(f["path"]) in immich_asset_map
         })
 
     return jsonify({
@@ -1237,7 +1281,8 @@ def api_semantic_search():
                     "size": size,
                     "size_human": format_size(size),
                     "thumbnail": get_thumb_filename(path),
-                    "type": "video" if os.path.splitext(path)[1].lower() in VIDEO_EXTS else "photo"
+                    "type": "video" if os.path.splitext(path)[1].lower() in VIDEO_EXTS else "photo",
+                    "is_immich": os.path.abspath(path) in immich_asset_map
                 })
             except OSError:
                 continue
@@ -1317,7 +1362,8 @@ def api_all_files():
             "size": f["size"],
             "size_human": format_size(f["size"]),
             "type": f["type"],
-            "thumbnail": get_thumb_filename(f["path"])
+            "thumbnail": get_thumb_filename(f["path"]),
+            "is_immich": os.path.abspath(f["path"]) in immich_asset_map
         })
 
     return jsonify({
@@ -1554,7 +1600,62 @@ a:hover { text-decoration: underline; }
     color: var(--accent);
 }
 
-.action-bar .summary strong {
+.action-bar .summary strong { color: var(--text-primary); }
+
+/* Immich Badge */
+.immich-badge {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    background: rgba(255, 255, 255, 0.9);
+    border-radius: var(--radius-sm);
+    padding: 2px 4px;
+    font-size: 12px;
+    box-shadow: var(--shadow-sm);
+    z-index: 10;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(0,0,0,0.1);
+}
+
+/* Toggle Switch */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+}
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: #cbd5e1;
+  transition: .4s;
+}
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 18px; width: 18px;
+  left: 3px; bottom: 3px;
+  background-color: white;
+  transition: .4s;
+}
+input:checked + .slider { background-color: var(--accent); }
+input:checked + .slider:before { transform: translateX(20px); }
+.slider.round { border-radius: 34px; }
+.slider.round:before { border-radius: 50%; }
+
+.form-group label { color: var(--text-primary); }
+.form-group input { 
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    outline: none;
+    transition: border var(--transition-fast);
+}
+.form-group input:focus { border-color: var(--accent); }
     color: var(--danger);
 }
 
@@ -2898,6 +2999,7 @@ select.sort-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px va
   <button class="tab" data-tab="cleanup">🧹 Cleanup</button>
   <button class="tab" data-tab="history">📋 History</button>
   <button class="tab smart-tab" data-tab="smart-search">✨ AI Search</button>
+  <button class="tab" data-tab="settings">⚙️ Settings</button>
 </div>
 
 <!-- Visual View -->
@@ -3177,6 +3279,77 @@ select.sort-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px va
   <div id="history-list"></div>
 </div>
 
+<!-- Settings Tab -->
+<div id="settings" class="tab-content">
+  <div style="max-width: 800px; margin: 0 auto;">
+    <h2 style="margin-bottom: 20px; display: flex; align-items: center; gap: 10px;">
+      <span style="font-size: 24px;">⚙️</span> Settings & Integration
+    </h2>
+    
+    <!-- Local Scan Configuration -->
+    <div style="margin-bottom: 24px; padding: 24px; border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-secondary); box-shadow: var(--shadow-sm);">
+      <h3 style="margin-bottom: 12px; display: flex; align-items: center; gap: 10px; font-size: 16px;">
+        📂 Scanning Directory
+      </h3>
+      <p style="color: var(--text-secondary); margin-bottom: 16px; font-size: 13px;">This is the root folder this tool is currently scanning for media and duplicates.</p>
+      <div style="display: flex; align-items: center; gap: 12px; background: var(--bg-tertiary); padding: 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
+        <code id="settings-root-path-display" style="flex: 1; font-size: 13px; font-family: 'SF Mono', monospace; overflow: hidden; text-overflow: ellipsis;">...</code>
+        <button class="btn btn-secondary" onclick="document.getElementById('btn-change-root').click()">Change Path</button>
+      </div>
+    </div>
+
+    <!-- Immich Integration -->
+    <div style="margin-bottom: 24px; padding: 24px; border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-secondary); box-shadow: var(--shadow-sm);">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+        <h3 style="display: flex; align-items: center; gap: 10px; font-size: 16px;">
+          ☁️ Immich Integration
+        </h3>
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <span id="immich-enable-label" style="font-size: 13px; font-weight: 500; color: var(--text-secondary);">Disabled</span>
+            <label class="switch">
+              <input type="checkbox" id="immich-enabled">
+              <span class="slider round"></span>
+            </label>
+        </div>
+      </div>
+      
+      <p style="color: var(--text-secondary); margin-bottom: 24px; font-size: 13px; line-height: 1.6;">
+        When enabled, this tool will attempt to map local files to assets in your <a href="https://immich.app" target="_blank">Immich</a> library. Deleting a mapped file will also remove it from Immich, preventing "ghost" entries.
+      </p>
+
+      <div id="immich-config-ui" style="display: flex; flex-direction: column; gap: 20px; border-top: 1px solid var(--border-light); padding-top: 24px;">
+        <div class="form-group">
+          <label style="display: block; font-size: 12px; font-weight: 700; margin-bottom: 8px; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.5px;">Immich Server URL</label>
+          <input type="text" id="immich-url" placeholder="http://192.168.1.10:2283" style="width: 100%; padding: 12px; border: 1px solid var(--border-color); border-radius: var(--radius-md); font-size: 14px;">
+        </div>
+        <div class="form-group">
+          <label style="display: block; font-size: 12px; font-weight: 700; margin-bottom: 8px; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.5px;">API Key</label>
+          <input type="password" id="immich-api-key" placeholder="Enter your Immich API key" style="width: 100%; padding: 12px; border: 1px solid var(--border-color); border-radius: var(--radius-md); font-size: 14px;">
+        </div>
+        <div class="form-group">
+            <label style="display: block; font-size: 12px; font-weight: 700; margin-bottom: 8px; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.5px;">Local Library Root (Optional)</label>
+            <input type="text" id="immich-library-root" placeholder="/path/to/immich/library" style="width: 100%; padding: 12px; border: 1px solid var(--border-color); border-radius: var(--radius-md); font-size: 14px;">
+            <p style="color: var(--text-muted); font-size: 11px; margin-top: 6px;">If Immich paths returned by the API are relative or different from this machine's local paths.</p>
+        </div>
+        
+        <div style="display: flex; gap: 12px; align-items: center; margin-top: 10px; flex-wrap: wrap;">
+          <button class="btn btn-primary" id="btn-save-immich" style="padding: 12px 24px;">Save Configuration</button>
+          <button class="btn btn-secondary" id="btn-test-immich" style="padding: 12px 24px;">Test Connection</button>
+          <button class="btn btn-secondary" id="btn-sync-immich" style="padding: 12px 24px;">Manual Sync</button>
+          <div id="immich-sync-status-container" style="margin-left: auto; background: var(--bg-tertiary); padding: 8px 16px; border-radius: var(--radius-full); border: 1px solid var(--border-color);">
+            <span id="immich-status-indicator" style="width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: #cbd5e1; margin-right: 8px;"></span>
+            <span id="immich-status-text" style="font-size: 12px; font-weight: 600; color: var(--text-secondary);">Disconnected</span>
+          </div>
+        </div>
+        
+        <div id="immich-sync-details" style="display:none; font-size: 12px; color: var(--text-muted); padding: 0 4px;">
+            Mapped <span id="immich-mapped-count">0</span> / <span id="immich-total-assets">0</span> assets. Last synced: <span id="immich-last-sync">Never</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 (function(){
 'use strict';
@@ -3298,6 +3471,7 @@ async function loadGroups(){
       const cls=isMarked?'imgbox delete-mark':'imgbox';
       html+=`<div class="${cls}" data-path="${escapeHtml(f.path)}" data-size="${f.size}">`;
       html+=`<div class="thumb-container">`;
+      if(f.is_immich) html+=`<div class="immich-badge" title="Managed by Immich">☁️</div>`;
       html+=`<img src="/thumbnails/${f.thumbnail}" loading="lazy" alt="">`;
       if(f.type==='video') html+=`<div class="video-overlay">&#9654;</div>`;
       html+=`</div>`;
@@ -3437,10 +3611,11 @@ function renderVisualPreview(resp){
     html+=`<div class="preview-grid">`;
     files.forEach(f=>{
       const fname=f.path.split('/').pop();
-      html+=`<div class="preview-card" data-pp="${escapeHtml(f.path)}" data-ps="${f.size}">`;
-      html+=`<input type="checkbox" class="pc-checkbox" checked data-pc="${escapeHtml(f.path)}">`;
+      html+=`<div class="thumb-container" style="position:relative">`;
+      if(f.is_immich) html+=`<div class="immich-badge" title="Managed by Immich">☁️</div>`;
       html+=`<img class="pc-thumb" src="/thumbnails/${f.thumbnail}" loading="lazy" alt="">`;
       if(f.type==='video') html+=`<div class="video-badge">&#9654;</div>`;
+      html+=`</div>`;
       html+=`<div class="pc-name" title="${escapeHtml(f.path)}">${escapeHtml(fname)}</div>`;
       html+=`<div class="pc-meta">${f.size_human}</div>`;
       html+=`</div>`;
@@ -3607,11 +3782,17 @@ async function loadHistory() {
                   </div>`;
                 }
 
+                let immichHtml = '';
+                if (d.immich_deleted) {
+                    immichHtml = `<div class="tag tag-immich" style="background:#eef2ff; color:#6366f1; font-size:10px; padding:2px 6px; border-radius:4px; display:inline-block; margin-top:4px; font-weight:600; border:1px solid #e0e7ff">☁️ Immich Deleted</div>`;
+                }
+
                 return `<div class="history-item" data-file-type="${iconClass}">
                 <div class="history-item-icon ${iconClass}">${iconSvg}</div>
                 <div class="history-item-content">
                     <span class="hist-path" title="${escapeHtml(d.path)}">${escapeHtml(fname)}</span>
                     ${keptHtml}
+                    ${immichHtml}
                 </div>
                 <div class="hist-meta">
                     <span class="hist-size">${d.size_human || ''}</span>
@@ -4186,6 +4367,7 @@ async function loadAllMedia() {
       html += `
         <div class="${cls}" data-all-path="${escapeHtml(f.path)}" data-full-path="${escapeHtml(f.path)}" data-size="${f.size}" data-type="${f.type}">
           <div class="thumb-container">
+            ${f.is_immich ? '<div class="immich-badge" title="Managed by Immich">☁️</div>' : ''}
             <img src="/thumbnails/${f.thumbnail}" loading="lazy" alt="">
             ${f.type === 'video' ? '<div class="video-overlay">&#9654;</div>' : ''}
           </div>
@@ -4306,6 +4488,7 @@ async function loadSmallFiles() {
       html += `
         <div class="${cls}" data-small-path="${escapeHtml(f.path)}" data-size="${f.size}">
           <div class="thumb-container">
+            ${f.is_immich ? '<div class="immich-badge" title="Managed by Immich">☁️</div>' : ''}
             <img src="/thumbnails/${f.thumbnail}" loading="lazy" alt="">
             ${f.type === 'video' ? '<div class="video-overlay">&#9654;</div>' : ''}
           </div>
@@ -4580,6 +4763,7 @@ function renderSmartResults(results, titleOverride=null) {
         
         html += `<div class="imgbox" data-path="${escapeHtml(f.path)}" data-smart-path="${escapeHtml(f.path)}" data-size="${f.size}">`;
         html += `<div class="thumb-container">`;
+        if (f.is_immich) html += `<div class="immich-badge" title="Managed by Immich">☁️</div>`;
         html += `<img src="/thumbnails/${f.thumbnail}" loading="lazy" alt="">`;
         if (f.type === 'video') html += `<div class="video-overlay">&#9654;</div>`;
         html += `</div>`;
@@ -4672,7 +4856,83 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     await refreshConfig();
 
-    
+    // -- Immich Integration --
+    const immichEnabled = document.getElementById('immich-enabled');
+    const immichUrl = document.getElementById('immich-url');
+    const immichApiKey = document.getElementById('immich-api-key');
+    const immichLibRoot = document.getElementById('immich-library-root');
+    const immichStatusText = document.getElementById('immich-status-text');
+    const immichStatusIndicator = document.getElementById('immich-status-indicator');
+    const immichSyncDetails = document.getElementById('immich-sync-details');
+
+    async function updateImmichUI() {
+        try {
+            const config = await apiGet('/api/immich/config');
+            immichEnabled.checked = config.immich_enabled;
+            immichUrl.value = config.immich_url || '';
+            immichApiKey.value = config.immich_api_key || '';
+            immichLibRoot.value = config.immich_library_root || '';
+            
+            document.getElementById('immich-enable-label').textContent = config.immich_enabled ? 'Enabled' : 'Disabled';
+            document.getElementById('immich-config-ui').style.opacity = config.immich_enabled ? '1' : '0.5';
+            
+            const status = await apiGet('/api/immich/status');
+            immichStatusText.textContent = status.status;
+            immichStatusIndicator.style.background = status.status === 'Synced' ? 'var(--success)' : 
+                                                   status.status === 'Syncing' ? 'var(--warning)' : '#cbd5e1';
+            
+            if (status.last_sync) {
+                immichSyncDetails.style.display = 'block';
+                document.getElementById('immich-mapped-count').textContent = status.mapped_assets;
+                document.getElementById('immich-total-assets').textContent = status.total_assets;
+                document.getElementById('immich-last-sync').textContent = new Date(status.last_sync * 1000).toLocaleString();
+            }
+        } catch (e) { console.error("Immich status check failed", e); }
+    }
+
+    document.getElementById('btn-save-immich').onclick = async () => {
+        const data = {
+            immich_enabled: immichEnabled.checked,
+            immich_url: immichUrl.value,
+            immich_api_key: immichApiKey.value,
+            immich_library_root: immichLibRoot.value
+        };
+        const resp = await apiPost('/api/immich/config', data);
+        if (resp.success) {
+            showToast("Immich configuration saved");
+            updateImmichUI();
+            if (data.immich_enabled) refreshAll();
+        }
+    };
+
+    document.getElementById('btn-test-immich').onclick = async () => {
+        const btn = document.getElementById('btn-test-immich');
+        btn.textContent = 'Testing...'; btn.disabled = true;
+        const resp = await apiPost('/api/immich/test', {
+            url: immichUrl.value,
+            api_key: immichApiKey.value
+        });
+        btn.textContent = 'Test Connection'; btn.disabled = false;
+        if (resp.success) showToast("Connection successful: " + resp.version, "success");
+        else showToast("Connection failed: " + resp.error, "error");
+    };
+
+    document.getElementById('btn-sync-immich').onclick = async () => {
+        const resp = await apiPost('/api/immich/sync');
+        if (resp.success) {
+            showToast("Sync started...");
+            setTimeout(updateImmichUI, 2000);
+        }
+    };
+
+    immichEnabled.onchange = () => {
+        document.getElementById('immich-enable-label').textContent = immichEnabled.checked ? 'Enabled' : 'Disabled';
+        document.getElementById('immich-config-ui').style.opacity = immichEnabled.checked ? '1' : '0.5';
+    };
+
+    updateImmichUI();
+    setInterval(updateImmichUI, 10000);
+
     // Smart Search Bindings
     if(document.getElementById('btn-smart-index')) {
         document.getElementById('btn-smart-index').onclick = triggerIndex;

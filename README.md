@@ -1,95 +1,183 @@
 # 📸 Photo-Clean-Up
 
-A comprehensive tool for managing and cleaning up large photo and video libraries. It features a modern web interface to find duplicates, remove empty folders, and perform semantic "Smart Search" using AI (CLIP).
+A powerful tool for managing and cleaning up large photo and video libraries. Features a modern web interface with AI-powered duplicate detection and semantic search.
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
 ![Flask](https://img.shields.io/badge/Flask-3.0%2B-green)
 ![PyTorch](https://img.shields.io/badge/PyTorch-AI-orange)
+![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)
 
 ## ✨ Features
 
-- **🚀 3-Phase Duplicate Detection**: Efficiently scans for duplicate media using a graduated approach:
-  1. File size grouping.
-  2. Partial hashing (header/footer).
-  3. Full SHA-256 hashing for 100% accuracy.
-- **🧠 Smart Search (AI-Powered)**: Search your photo library using natural language (e.g., "sunset on the beach", "cute cat", "family dinner") powered by OpenAI's CLIP model.
-- **📁 Folder-Level Cleanup**: Identify and clean up specific folders that contain duplicates that are already saved elsewhere.
-- **🗑️ Trash Integration**: Safely moves files to the system trash instead of permanent deletion.
-- **📂 Empty Folder Finder**: Quickly find and remove empty or "effectively empty" folders (containing only `.DS_Store`).
-- **📱 Responsive Web UI**: A clean, interactive dashboard to manage your entire media library.
-- **🎥 Video Support**: Identifies duplicate videos and generates video thumbnails using FFmpeg.
+- **🚀 Smart Duplicate Detection**: 3-phase scanning (size → partial hash → full SHA-256) for 100% accuracy
+- **🧠 AI-Powered Search**: Find photos using natural language (e.g., "sunset on beach", "family dinner") via CLIP
+- **📁 Folder Cleanup**: Identify and remove duplicates across folders
+- **🗑️ Safe Deletion**: Moves files to trash instead of permanent deletion
+- **📂 Empty Folder Finder**: Automatically detect and remove empty directories
+- **🎥 Video Support**: Duplicate detection and thumbnail generation with FFmpeg
+- **📱 Modern Web UI**: Clean, responsive interface for managing your entire library
 
-## 🛠️ Installation
+## 🚀 Quick Start (Docker - Recommended)
 
-### 1. Prerequisites
-- **Python 3.8+**
-- **FFmpeg** (for video thumbnails)
+**3 steps to get started:**
+
+```bash
+# 1. Clone and navigate
+git clone https://github.com/Amal97/Photo-Clean-Up.git
+cd Photo-Clean-Up
+
+# 2. Configure your photos directory
+cp .env.example .env
+# Edit .env: PHOTOS_DIR=/path/to/your/photos
+
+# 3. Launch
+docker-compose up -d
+```
+
+**Access at:** `http://localhost:8080`
+
+**View logs:** `docker-compose logs -f`
+
+### Important: Accessing the Container
+✅ Always use `http://localhost:8080` on your host machine  
+❌ Don't try to access the container's internal IP (e.g., 172.x.x.x)
+
+The container can only scan directories you mount. To scan a different directory:
+```bash
+# Edit .env file
+PHOTOS_DIR=/path/to/different/photos
+
+# Restart
+docker-compose down
+docker-compose up -d
+```
+
+### Docker Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHOTOS_DIR` | - | **Required**: Path to your photos on host machine |
+| `PORT` | `8080` | Web server port |
+| `IMMICH_API_URL` | - | Optional: Immich integration endpoint |
+| `IMMICH_API_KEY` | - | Optional: Immich API key |
+
+**Advanced setup?** See [DOCKER.md](DOCKER.md) for GPU support, reverse proxies, Kubernetes, and more.
+
+---
+
+## 🛠️ Local Installation (Without Docker)
+
+### Prerequisites
+- Python 3.8+
+- FFmpeg (for video thumbnails)
   - macOS: `brew install ffmpeg`
   - Linux: `sudo apt install ffmpeg`
 
-### 2. Clone the Repository
+### Setup
+
 ```bash
-git clone https://github.com/yourusername/Photo-Clean-Up.git
+# Clone repository
+git clone https://github.com/Amal97/Photo-Clean-Up.git
 cd Photo-Clean-Up
-```
 
-### 3. Install Dependencies
-```bash
+# Install dependencies
 pip install -r requirements.txt
-```
 
-### 4. Configuration
-Open `clean.py` and update the `ROOT_DIR` variable to point to your photos directory:
-```python
-ROOT_DIR = "/path/to/your/photos"
-```
-
-## 🚀 Usage
-
-### Start the Web Interface
-```bash
+# Run
 python clean.py
 ```
-After starting, open your browser and navigate to `http://localhost:8080`.
+
+**Access at:** `http://localhost:8080`
+
+### Configuration
+
+You can set the photos directory via:
+1. **Environment variable** (recommended):
+   ```bash
+   export ROOT_DIR=/path/to/photos
+   python clean.py
+   ```
+
+2. **Settings file**: Edit via the web UI Settings tab
+
+3. **Code**: Edit `ROOT_DIR` in `clean.py` (line 38)
+
+---
+
+## 📖 Usage
+
+### Web Interface
+- **Duplicates Tab**: Review and delete duplicate files
+- **Folders Tab**: Find folders containing duplicates
+- **Smart Search**: AI-powered natural language search
+- **Small Files**: Find and remove screenshots/small images
+- **Empty Folders**: Detect and clean empty directories
+- **All Media**: Browse and manage your entire library
+- **History**: Track deleted files and space saved
 
 ### CLI Tools
-You can also use `tools.py` for headless operations:
 
-- **Index images for Smart Search**:
-  ```bash
-  python tools.py index
-  ```
-- **Cleanup based on folder rules**:
-  ```bash
-  python tools.py cleanup /path/to/keep/folder
-  ```
+```bash
+# Index images for Smart Search
+python tools.py index
+
+# Cleanup based on folder rules
+python tools.py cleanup /path/to/keep/folder
+```
+
+---
 
 ## 🧠 Smart Search (CLIP)
 
-The Smart Search feature utilizes the `openai/clip-vit-base-patch32` model.
-- **First Run**: It will download the model (~600MB) from Hugging Face.
-- **Acceleration**: On macOS, it automatically uses **Apple Silicon (MPS)** for faster indexing.
-- **Indexing**: Images are indexed in batches for efficiency. Once indexed, search is instantaneous.
+First run downloads the CLIP model (~600MB) from Hugging Face.
 
-## 📝 File Structure
+- **macOS**: Automatically uses Apple Silicon (MPS) for faster indexing
+- **Linux/Windows**: Uses CPU (or CUDA if available)
+- **Performance**: ~200-2000 images/minute depending on hardware
 
-- `clean.py`: Main Flask application and business logic.
-- `tools.py`: CLI utilities for indexing and rules-based cleanup.
-- `requirements.txt`: Python dependencies.
-- `all_files_index.json`: Cache of scanned files.
-- `image_embeddings.json`: AI-generated embeddings for Smart Search.
-- `deletion_history.json`: Tracks total space saved and deleted files.
-- `thumbnails/`: Cache for UI thumbnails.
+---
+
+## 🐳 Docker Tips
+
+**View logs:**
+```bash
+docker-compose logs -f
+```
+
+**Stop:**
+```bash
+docker-compose down
+```
+
+**Rebuild after code changes:**
+```bash
+docker-compose up -d --build
+```
+
+**Permission errors?**
+```bash
+# Edit docker-compose.yml, add:
+user: "1000:1000"  # Use your host user ID
+```
+
+**Port conflict?**
+```bash
+# Edit .env file:
+PORT=8090  # Use different port
+```
+
+---
 
 ## ⚖️ License & Attribution
 
-This project is licensed under the **MIT License**. 
+This project is licensed under the **MIT License**.
 
-### Special Attribution Requirement
-If you use this software, or portions of it, in your own projects (whether open-source or commercial), **you must provide attribution** by:
-1. Retaining the original `LICENSE` and `NOTICE` files in your repository.
-2. Including a link back to this original repository: `https://github.com/Amal97/Photo-Clean-Up`
-3. Crediting **Amal Chandra** in your project's documentation or "About" section.
+### Attribution Requirement
+If you use this software in your projects (open-source or commercial), you must:
+1. Retain the `LICENSE` and `NOTICE` files
+2. Link back to this repository: `https://github.com/Amal97/Photo-Clean-Up`
+3. Credit **Amal Chandra** in your documentation
 
 ---
+
 *Built with ❤️ by [Amal Chandra](https://github.com/Amal97)*

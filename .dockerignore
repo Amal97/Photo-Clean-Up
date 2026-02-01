@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Data files (these should be in volumes, not baked into image)
+thumbnails/
+*.json
+!requirements.txt
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation (we want these in the image for reference)
+!README.md
+!LICENSE
+!NOTICE
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+.env
+.env.example
+
+# CI/CD
+.github/

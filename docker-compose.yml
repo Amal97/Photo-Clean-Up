@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  photo-cleanup:
+    image: photo-cleanup:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: photo-cleanup
+    restart: unless-stopped
+
+    ports:
+      - "${PORT:-8080}:8080"
+
+    volumes:
+      # Mount your photos directory (REQUIRED - update this path!)
+      - ${PHOTOS_DIR:-~/Pictures}:/photos:ro
+
+      # Persistent data (thumbnails, embeddings, history, settings)
+      - photo-cleanup-data:/app/data
+      # Optional: Mount config if you want to manage settings.json externally
+      # - ./settings.json:/app/settings.json
+
+    environment:
+      # Root directory to scan (inside container, maps to PHOTOS_DIR volume)
+      - ROOT_DIR=/photos
+
+      # Web server port
+      - PORT=8080
+
+      # Optional: Immich integration
+      - IMMICH_API_URL=${IMMICH_API_URL:-}
+      - IMMICH_API_KEY=${IMMICH_API_KEY:-}
+
+    # Resource limits (adjust based on your system)
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+
+    # Health check
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080').read()" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  photo-cleanup-data:
+    driver: local

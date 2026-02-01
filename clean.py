@@ -42,6 +42,30 @@ THUMB_SIZE = (150, 150)
 THUMB_QUALITY = 50
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deletion_history.json")
 PARTIAL_HASH_SIZE = 8192  # 8 KB for partial hashing
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_settings(settings):
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(settings, f, indent=2)
+    except Exception as e:
+        print(f"Failed to save settings: {e}")
+
+_settings = load_settings()
+ROOT_DIR = os.path.expanduser(_settings.get("root_dir", "~/Pictures"))
+# Ensure ROOT_DIR exists
+if not os.path.isdir(ROOT_DIR):
+    ROOT_DIR = os.path.expanduser("~/Pictures")
+ROOT_DIR = os.path.abspath(ROOT_DIR)
 
 # ---------------------------------------------------------------------------
 # Global state
@@ -61,13 +85,35 @@ scan_stats = {
 # ---------------------------------------------------------------------------
 
 def load_history():
+    history = {
+        "total_space_saved": 0,
+        "total_images_deleted": 0,
+        "total_videos_deleted": 0,
+        "space_saved_images": 0,
+        "space_saved_videos": 0,
+        "deletions": []
+    }
     if os.path.exists(HISTORY_FILE):
         try:
             with open(HISTORY_FILE, "r") as f:
-                return json.load(f)
+                data = json.load(f)
+                history.update(data)
+                
+                # Backfill if necessary
+                if history["total_space_saved"] > 0 and history["total_images_deleted"] == 0 and history["total_videos_deleted"] == 0:
+                    print("Migrating history for granular stats...")
+                    for d in history.get("deletions", []):
+                        path_str = d.get("path", "")
+                        ext = os.path.splitext(path_str)[1].lower()
+                        if ext in VIDEO_EXTS:
+                            history["total_videos_deleted"] += 1
+                            history["space_saved_videos"] += d.get("size", 0)
+                        else:
+                            history["total_images_deleted"] += 1
+                            history["space_saved_images"] += d.get("size", 0)
         except (json.JSONDecodeError, IOError):
             pass
-    return {"total_space_saved": 0, "deletions": []}
+    return history
 
 
 def enrich_history_from_index():
@@ -385,6 +431,10 @@ def compute_stats():
         "total_files_scanned": scan_stats["total_files_scanned"],
         "space_saved": deletion_history["total_space_saved"],
         "space_saved_human": format_size(deletion_history["total_space_saved"]),
+        "images_deleted": deletion_history.get("total_images_deleted", 0),
+        "videos_deleted": deletion_history.get("total_videos_deleted", 0),
+        "space_saved_images_human": format_size(deletion_history.get("space_saved_images", 0)),
+        "space_saved_videos_human": format_size(deletion_history.get("space_saved_videos", 0)),
         "scan_complete": scan_complete,
         "scan_phase": scan_stats["phase"],
         "scan_detail": scan_stats["phase_detail"],
@@ -414,9 +464,6 @@ def compute_folder_stats():
         })
     return result
 
-# ---------------------------------------------------------------------------
-# Trash helpers
-# ---------------------------------------------------------------------------
 
 def move_to_trash(path):
     """Move a file to Trash. Returns (success: bool, error: str|None)."""
@@ -735,6 +782,44 @@ def serve_thumbnail(filename):
     return send_from_directory(THUMB_DIR, filename)
 
 
+@app.route("/api/config", methods=["GET", "POST"])
+def api_config():
+    global ROOT_DIR, scan_complete, duplicates, all_media_files
+    if request.method == "POST":
+        data = request.get_json()
+        new_root = data.get("root_dir")
+        if new_root:
+            new_root = os.path.expanduser(new_root)
+            # Add trailing slash if not present as requested by user
+            if not new_root.endswith(os.sep):
+                new_root += os.sep
+                
+            if os.path.isdir(new_root):
+                ROOT_DIR = os.path.abspath(new_root)
+                # Ensure it has trailing slash for consistency if requested
+                if not ROOT_DIR.endswith(os.sep):
+                    ROOT_DIR += os.sep
+                
+                # Save to settings
+                settings = load_settings()
+                settings["root_dir"] = ROOT_DIR
+                save_settings(settings)
+                
+                # Reset state and restart scan
+                duplicates = {}
+                all_media_files = []
+                scan_complete = False
+                scan_stats["phase"] = "idle"
+                scan_stats["phase_detail"] = "Restarting scan for new directory..."
+                
+                threading.Thread(target=run_scan, daemon=True).start()
+                return jsonify({"success": True, "root_dir": ROOT_DIR})
+            else:
+                return jsonify({"success": False, "error": f"Invalid directory: {new_root}"}), 400
+        return jsonify({"success": False, "error": "No directory provided"}), 400
+    return jsonify({"root_dir": ROOT_DIR})
+
+
 @app.route("/api/stats")
 def api_stats():
     return jsonify(compute_stats())
@@ -825,6 +910,13 @@ def api_delete():
 
     # Record in history
     deletion_history["total_space_saved"] += size
+    ext = os.path.splitext(path)[1].lower()
+    if ext in VIDEO_EXTS:
+        deletion_history["total_videos_deleted"] = deletion_history.get("total_videos_deleted", 0) + 1
+        deletion_history["space_saved_videos"] = deletion_history.get("space_saved_videos", 0) + size
+    else:
+        deletion_history["total_images_deleted"] = deletion_history.get("total_images_deleted", 0) + 1
+        deletion_history["space_saved_images"] = deletion_history.get("space_saved_images", 0) + size
     deletion_history["deletions"].append({
         "path": path,
         "size": size,
@@ -873,6 +965,13 @@ def api_delete_batch():
             remove_file_from_duplicates(path)
             remove_file_from_index(path)
             deletion_history["total_space_saved"] += size
+            ext = os.path.splitext(path)[1].lower()
+            if ext in VIDEO_EXTS:
+                deletion_history["total_videos_deleted"] = deletion_history.get("total_videos_deleted", 0) + 1
+                deletion_history["space_saved_videos"] = deletion_history.get("space_saved_videos", 0) + size
+            else:
+                deletion_history["total_images_deleted"] = deletion_history.get("total_images_deleted", 0) + 1
+                deletion_history["space_saved_images"] = deletion_history.get("space_saved_images", 0) + size
             deletion_history["deletions"].append({
                 "path": path,
                 "size": size,
@@ -998,6 +1097,13 @@ def api_folder_rules():
         if ok:
             remove_file_from_duplicates(f["path"])
             deletion_history["total_space_saved"] += size
+            ext = os.path.splitext(f["path"])[1].lower()
+            if ext in VIDEO_EXTS:
+                deletion_history["total_videos_deleted"] = deletion_history.get("total_videos_deleted", 0) + 1
+                deletion_history["space_saved_videos"] = deletion_history.get("space_saved_videos", 0) + size
+            else:
+                deletion_history["total_images_deleted"] = deletion_history.get("total_images_deleted", 0) + 1
+                deletion_history["space_saved_images"] = deletion_history.get("space_saved_images", 0) + size
             deletion_history["deletions"].append({
                 "path": f["path"],
                 "size": size,
@@ -1239,166 +1345,1254 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Duplicate Photo &amp; Video Finder</title>
+<title>Photo Clean-Up</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#333;padding:20px;min-height:100vh}
-h1{font-size:24px;margin-bottom:20px;color:#1a1a2e}
-a{color:#4361ee}
+/* ========================================
+   Modern Minimal Design System
+   ======================================== */
 
-/* Stats */
-.stats{display:flex;gap:14px;margin-bottom:20px;flex-wrap:wrap}
-.stat-box{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:18px 22px;border-radius:12px;min-width:170px;flex:1}
-.stat-box h3{font-size:12px;opacity:.85;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
-.stat-box .value{font-size:26px;font-weight:700}
-.stat-box.green{background:linear-gradient(135deg,#11998e 0%,#38ef7d 100%)}
+:root {
+    /* Colors */
+    --bg-primary: #f8fafc;
+    --bg-secondary: #ffffff;
+    --bg-tertiary: #f1f5f9;
+    --text-primary: #1e293b;
+    --text-secondary: #64748b;
+    --text-muted: #94a3b8;
+    --border-color: #e2e8f0;
+    --border-light: #f1f5f9;
+    
+    /* Accent Colors */
+    --accent: #6366f1;
+    --accent-hover: #4f46e5;
+    --accent-light: #eef2ff;
+    --success: #10b981;
+    --success-light: #ecfdf5;
+    --success-border: #a7f3d0;
+    --danger: #f43f5e;
+    --danger-hover: #e11d48;
+    --danger-light: #fff1f2;
+    --danger-border: #fecdd3;
+    --warning: #f59e0b;
+    --warning-light: #fffbeb;
+    
+    /* Spacing */
+    --space-xs: 4px;
+    --space-sm: 8px;
+    --space-md: 16px;
+    --space-lg: 24px;
+    --space-xl: 32px;
+    
+    /* Border Radius */
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --radius-xl: 20px;
+    --radius-full: 9999px;
+    
+    /* Shadows */
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+    --shadow-md: 0 4px 12px rgba(0,0,0,0.06);
+    --shadow-lg: 0 8px 24px rgba(0,0,0,0.08);
+    --shadow-xl: 0 12px 40px rgba(0,0,0,0.12);
+    
+    /* Transitions */
+    --transition-fast: 0.15s ease;
+    --transition-normal: 0.2s ease;
+    --transition-slow: 0.3s ease;
+}
 
-/* Tabs */
-.tabs{display:flex;gap:4px;margin-bottom:0}
-.tab{padding:10px 22px;background:#ddd;border:none;cursor:pointer;border-radius:8px 8px 0 0;font-size:14px;transition:background .15s}
-.tab:hover{background:#ccc}
-.tab.active{background:#fff;font-weight:600}
-.tab-content{display:none;background:#fff;padding:20px;border-radius:0 8px 8px 8px}
-.tab-content.active{display:block}
+* { box-sizing: border-box; margin: 0; padding: 0; }
 
-/* Action bar */
-.action-bar{position:sticky;top:0;z-index:100;background:#fff;padding:14px 18px;border-radius:10px;margin-bottom:18px;box-shadow:0 2px 12px rgba(0,0,0,.08);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
-.action-bar .summary{font-size:14px;color:#555}
-.action-bar .controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    padding: var(--space-lg);
+    min-height: 100vh;
+    line-height: 1.5;
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+}
 
-/* Buttons */
-.btn{padding:7px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;transition:opacity .15s}
-.btn:hover{opacity:.85}
-.btn:disabled{opacity:.5;cursor:not-allowed}
-.btn-keep{background:#27ae60;color:#fff}
-.btn-delete{background:#e74c3c;color:#fff}
-.btn-primary{background:#4361ee;color:#fff}
-.btn-danger{background:#e74c3c;color:#fff}
-.btn-secondary{background:#6c757d;color:#fff}
-.btn-success{background:#27ae60;color:#fff}
-.btn-lg{padding:10px 20px;font-size:14px}
-select.sort-select{padding:7px 10px;font-size:13px;border-radius:6px;border:1px solid #ccc}
+h1, h2, h3 { font-weight: 600; letter-spacing: -0.02em; }
+h1 { font-size: 1.75rem; color: var(--text-primary); margin-bottom: var(--space-lg); }
+h2 { font-size: 1.25rem; color: var(--text-primary); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
 
-/* Groups */
-.group{margin-bottom:18px;background:#fff;padding:16px;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,.06);transition:opacity .3s}
-.group-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
-.group-header h3{font-size:14px;color:#333}
-.images{display:flex;gap:12px;flex-wrap:wrap}
-.imgbox{width:190px;border:2px solid transparent;padding:10px;border-radius:8px;transition:all .2s}
-.imgbox.keep{border-color:#27ae60;background:#e8f5e9}
-.imgbox.delete-mark{border-color:#e74c3c;background:#ffebee;opacity:.75}
-.imgbox .thumb-container{position:relative;min-height:80px;display:flex;align-items:center;justify-content:center;background:#f5f5f5;border-radius:6px;overflow:hidden}
-.imgbox img{max-width:170px;max-height:120px;border-radius:4px;cursor:pointer;display:block}
-.imgbox .video-overlay{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:36px;color:#fff;text-shadow:0 0 12px rgba(0,0,0,.7);pointer-events:none}
-.imgbox .path{font-size:9px;word-break:break-all;margin-top:6px;color:#777;max-height:34px;overflow:hidden}
-.imgbox .meta{font-size:10px;color:#999;margin-top:2px}
-.type-badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:700;margin-left:4px}
-.type-badge.video{background:#9b59b6;color:#fff}
-.type-badge.photo{background:#3498db;color:#fff}
-.imgbox .actions{margin-top:8px;display:flex;gap:6px}
+/* ========================================
+   Stats Cards - Clean Flat Design
+   ======================================== */
+.stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: var(--space-md);
+    margin-bottom: var(--space-lg);
+}
 
-    /* Group Collapse/Expand */
-    .group-header { cursor: pointer; user-select: none; }
-    .group-header:hover { background-color: #f9f9f9; }
-    .group-toggle-icon { display: inline-block; margin-right: 8px; transition: transform 0.2s; }
-    .group-body { display: block; margin-top: 12px; } /* Expanded by default */
-    .group.collapsed .group-toggle-icon { transform: rotate(-90deg); }
+.stat-box {
+    background: var(--bg-secondary);
+    padding: var(--space-lg);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-color);
+    transition: all var(--transition-normal);
+}
 
-    /* Kept Info in History */
-    .kept-info { margin-top: 4px; padding: 4px 8px; background: #e8f5e9; border-radius: 4px; font-size: 11px; color: #2e7d32; border: 1px solid #c8e6c9; display: inline-block; }
-    .kept-info strong { font-weight: 600; }
+.stat-box:hover {
+    box-shadow: var(--shadow-md);
+    transform: translateY(-2px);
+}
 
-/* Pagination */
-.pagination{display:flex;justify-content:center;align-items:center;gap:12px;margin:20px 0;padding:14px;background:#fff;border-radius:10px}
-.pagination button{padding:8px 18px;border:1px solid #ddd;background:#fff;cursor:pointer;border-radius:6px;font-size:13px}
-.pagination button:hover:not(:disabled){background:#f0f0f0}
-.pagination button:disabled{opacity:.4;cursor:not-allowed}
-.page-info{font-size:13px;color:#666}
+.stat-box h3 {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: var(--space-sm);
+}
 
-/* Folder list */
-.folder-list{max-height:500px;overflow-y:auto}
-.folder-item{padding:10px 12px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:10px}
-.folder-item:hover{background:#f9f9f9}
-.folder-item input[type="checkbox"]{width:18px;height:18px;cursor:pointer;flex-shrink:0}
-.folder-item.kept{background:#e8f5e9;border-left:4px solid #2e7d32}
-.folder-item.to-delete{background:#ffebee;border-left:4px solid #c62828}
-.folder-path{font-family:monospace;font-size:12px;word-break:break-all;flex:1}
-.folder-count{background:#7f8c8d;color:#fff;padding:2px 10px;border-radius:12px;font-size:11px;margin-left:10px;white-space:nowrap}
-.folder-count.delete-badge{background:#e74c3c}
-.folder-count.keep-badge{background:#27ae60}
-.folder-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px;padding:14px;background:#fff;border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,.08)}
-.folder-actions .info{font-size:13px;color:#555;flex:1}
-.preview-box{margin:16px 0;padding:16px;background:#fffde7;border:1px solid #ffe082;border-radius:8px;font-size:13px}
-.preview-box strong{color:#e65100}
+.stat-box .value {
+    font-size: 1.75rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.02em;
+}
 
-/* History */
-.history-folder-section{margin-bottom:20px}
-.history-folder-header{display:flex;align-items:center;gap:8px;padding:10px 12px;background:#f0f2f5;border-radius:8px 8px 0 0;font-size:12px;font-weight:600;color:#333;border:1px solid #e0e0e0;border-bottom:none;cursor:pointer;user-select:none;transition:background .15s}
-.history-folder-header:hover{background:#e4e6eb}
-.history-folder-header .hist-folder-toggle{font-size:12px;color:#666;flex-shrink:0;transition:transform .2s}
-.history-folder-header .hist-folder-toggle.open{transform:rotate(90deg)}
-.history-folder-header .hist-folder-label{flex:1;word-break:break-all}
-.history-folder-body{border:1px solid #e0e0e0;border-radius:0 0 8px 8px;overflow:hidden}
-.history-folder-body.collapsed{display:none}
-.history-item{padding:10px 12px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;font-size:13px}
-.history-item:last-child{border-bottom:none}
-.history-item .hist-path{font-family:monospace;font-size:11px;word-break:break-all;flex:1;color:#555}
-.history-item .hist-meta{text-align:right;white-space:nowrap;margin-left:12px;color:#888;font-size:11px}
+.stat-box.green .value { color: var(--success); }
+.stat-box.purple .value { color: var(--accent); }
 
-/* Toast */
-.toast-container{position:fixed;top:20px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:8px}
-.toast{padding:12px 20px;border-radius:8px;color:#fff;font-size:13px;box-shadow:0 4px 14px rgba(0,0,0,.15);animation:toastIn .3s ease;max-width:380px}
-.toast.success{background:#27ae60}
-.toast.error{background:#e74c3c}
-.toast.info{background:#4361ee}
-@keyframes toastIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
+/* ========================================
+   Modern Pill Tabs
+   ======================================== */
+.tabs {
+    display: flex;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-lg);
+    padding: var(--space-xs);
+    background: var(--bg-secondary);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-color);
+    flex-wrap: wrap;
+}
 
-/* Scan overlay */
-.scan-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.6);z-index:10000;display:flex;align-items:center;justify-content:center}
-.scan-box{background:#fff;padding:40px 50px;border-radius:16px;text-align:center;max-width:420px}
-.scan-box h2{margin-bottom:12px}
-.scan-box .phase{color:#666;font-size:14px;margin-top:8px}
-.spinner{width:40px;height:40px;border:4px solid #e0e0e0;border-top-color:#4361ee;border-radius:50%;animation:spin .8s linear infinite;margin:16px auto}
-@keyframes spin{to{transform:rotate(360deg)}}
+.tab {
+    padding: var(--space-sm) var(--space-md);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    border-radius: var(--radius-md);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+}
 
-/* Empty state */
-.empty{text-align:center;padding:60px 20px;color:#999}
-.empty .icon{font-size:48px;margin-bottom:12px}
+.tab:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
 
-/* Folder-rule visual preview */
-.preview-summary-bar{padding:14px 18px;background:#fff;border-radius:10px;margin-bottom:16px;box-shadow:0 2px 12px rgba(0,0,0,.08);font-size:14px;color:#555}
-.preview-summary-bar strong{color:#333}
-.preview-folder-section{background:#fff;border-radius:10px;margin-bottom:14px;box-shadow:0 1px 4px rgba(0,0,0,.06);overflow:hidden}
-.preview-folder-header{display:flex;align-items:center;gap:10px;padding:12px 16px;cursor:pointer;user-select:none;background:#fafafa;border-bottom:1px solid #eee;transition:background .15s}
-.preview-folder-header:hover{background:#f0f0f0}
-.preview-folder-header .folder-toggle{font-size:12px;color:#888;transition:transform .2s;flex-shrink:0}
-.preview-folder-header .folder-toggle.open{transform:rotate(90deg)}
-.preview-folder-header .folder-name{font-family:monospace;font-size:12px;word-break:break-all;flex:1;color:#333}
-.preview-folder-header .folder-badge{background:#e74c3c;color:#fff;padding:2px 10px;border-radius:12px;font-size:11px;white-space:nowrap}
-.preview-folder-header .folder-check-toggle{padding:4px 10px;border:1px solid #ccc;border-radius:5px;font-size:11px;cursor:pointer;background:#fff;white-space:nowrap}
-.preview-folder-header .folder-check-toggle:hover{background:#f0f0f0}
-.preview-folder-body{padding:12px 16px}
-.preview-folder-body.collapsed{display:none}
-.preview-grid{display:flex;flex-wrap:wrap;gap:12px}
-.preview-card{width:170px;border:2px solid #e74c3c;padding:8px;border-radius:8px;background:#ffebee;transition:all .2s;position:relative}
-.preview-card.unchecked{border-color:#ccc;background:#f9f9f9;opacity:.6}
-.preview-card .pc-checkbox{position:absolute;top:6px;left:6px;z-index:2;width:18px;height:18px;cursor:pointer;accent-color:#e74c3c}
-.preview-card .pc-thumb{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:4px;display:block;background:#f5f5f5}
-.preview-card .pc-name{font-size:10px;word-break:break-all;margin-top:5px;color:#555;max-height:28px;overflow:hidden;line-height:1.3}
-.preview-card .pc-meta{font-size:10px;color:#999;margin-top:2px}
-.preview-card .video-badge{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:28px;color:#fff;text-shadow:0 0 10px rgba(0,0,0,.6);pointer-events:none}
-.preview-bottom-bar{position:fixed;bottom:0;left:0;right:0;z-index:200;background:#fff;border-top:2px solid #e0e0e0;padding:12px 24px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 -4px 16px rgba(0,0,0,.1)}
-.preview-bottom-bar .pbb-info{font-size:14px;color:#555}
-.preview-bottom-bar .pbb-info strong{color:#333}
-.preview-bottom-bar .pbb-actions{display:flex;gap:10px}
+.tab.active {
+    background: var(--accent);
+    color: white;
+    font-weight: 600;
+}
 
-/* Modal */
-.modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.9);z-index:11000;align-items:center;justify-content:center;flex-direction:column}
-.modal.active{display:flex}
-.modal-close{position:absolute;top:20px;right:30px;color:#fff;font-size:40px;cursor:pointer;user-select:none}
-.modal-content{max-width:95%;max-height:85%;object-fit:contain;box-shadow:0 0 30px rgba(0,0,0,.5)}
-.modal-caption{color:#fff;margin-top:20px;font-size:14px;text-align:center;word-break:break-all;max-width:80%}
-.modal-actions{margin-top:15px;display:flex;gap:15px}
+.tab.smart-tab {
+    background: linear-gradient(135deg, #a78bfa 0%, #6366f1 100%);
+    color: white;
+}
+
+.tab.smart-tab:not(.active) {
+    background: var(--accent-light);
+    color: var(--accent);
+}
+
+.tab-content {
+    display: none;
+    background: var(--bg-secondary);
+    padding: var(--space-lg);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-color);
+}
+
+.tab-content.active { display: block; }
+
+/* ========================================
+   Action Bar
+   ======================================== */
+.action-bar {
+    position: sticky;
+    top: var(--space-md);
+    z-index: 100;
+    background: var(--bg-secondary);
+    padding: var(--space-md) var(--space-lg);
+    border-radius: var(--radius-lg);
+    margin-bottom: var(--space-lg);
+    border: 1px solid var(--border-color);
+    box-shadow: var(--shadow-md);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-md);
+}
+
+.action-bar .summary {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.action-bar .summary span { 
+    font-weight: 700; 
+    color: var(--accent);
+}
+
+.action-bar .summary strong {
+    color: var(--danger);
+}
+
+.action-bar .controls {
+    display: flex;
+    gap: var(--space-sm);
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+/* ========================================
+   Modern Buttons
+   ======================================== */
+.btn {
+    padding: var(--space-sm) var(--space-md);
+    border: none;
+    border-radius: var(--radius-full);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: all var(--transition-fast);
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+    box-shadow: var(--shadow-sm);
+}
+
+.btn:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+}
+
+.btn:active { transform: translateY(0); }
+
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none !important;
+    box-shadow: none !important;
+}
+
+.btn-primary {
+    background: var(--accent);
+    color: white;
+}
+.btn-primary:hover { background: var(--accent-hover); }
+
+.btn-danger {
+    background: var(--danger);
+    color: white;
+}
+.btn-danger:hover { background: #dc2626; }
+
+.btn-success, .btn-keep {
+    background: var(--success);
+    color: white;
+}
+.btn-success:hover, .btn-keep:hover { background: #059669; }
+
+.btn-delete {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+}
+.btn-delete:hover {
+    background: var(--accent-light);
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+.delete-mark .btn-delete {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+}
+
+.btn-secondary {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+    box-shadow: none;
+}
+.btn-secondary:hover {
+    background: var(--border-color);
+    color: var(--text-primary);
+}
+
+.btn-lg {
+    padding: 10px 20px;
+    font-size: 14px;
+}
+
+select.sort-select {
+    padding: var(--space-sm) var(--space-md);
+    font-size: 13px;
+    border-radius: var(--radius-full);
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    cursor: pointer;
+    outline: none;
+    transition: all var(--transition-fast);
+}
+
+select.sort-select:hover { border-color: var(--accent); }
+select.sort-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-light); }
+
+/* ========================================
+   Groups & Cards
+   ======================================== */
+.group {
+    margin-bottom: var(--space-md);
+    background: var(--bg-secondary);
+    padding: var(--space-lg);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-color);
+    transition: all var(--transition-normal);
+}
+
+.group:hover { box-shadow: var(--shadow-sm); }
+
+.group-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--space-sm);
+    margin: calc(-1 * var(--space-sm));
+    margin-bottom: var(--space-md);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    user-select: none;
+    transition: background var(--transition-fast);
+}
+
+.group-header:hover { background: var(--bg-tertiary); }
+
+.group-header h3 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.group-toggle-icon {
+    display: inline-block;
+    margin-right: var(--space-sm);
+    transition: transform var(--transition-fast);
+    color: var(--text-muted);
+}
+
+.group-body { margin-top: var(--space-md); }
+.group.collapsed .group-toggle-icon { transform: rotate(-90deg); }
+
+.images {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, 120px);
+    grid-auto-rows: 240px;
+    gap: var(--space-md);
+    justify-content: start;
+}
+
+/* ========================================
+   Image Box - Modern Card Style
+   ======================================== */
+.imgbox {
+    background: var(--bg-secondary);
+    border: 2px solid var(--border-color);
+    padding: 8px;
+    border-radius: var(--radius-md);
+    transition: all var(--transition-normal);
+    position: relative;
+    overflow: hidden;
+    width: 120px;
+    height: 240px;
+    display: flex;
+    flex-direction: column;
+}
+
+.imgbox:hover {
+    border-color: var(--accent);
+    box-shadow: var(--shadow-md);
+    transform: translateY(-2px);
+}
+
+.imgbox.keep {
+    border-color: var(--success);
+    background: var(--success-light);
+}
+
+.imgbox.delete-mark {
+    border-color: var(--accent);
+    background: var(--accent-light);
+    transform: scale(0.98);
+}
+
+/* Remove old indicator */
+.imgbox.delete-mark::before { display: none; }
+
+@keyframes popIn {
+    from { transform: scale(0); }
+    to { transform: scale(1); }
+}
+
+.imgbox .thumb-container {
+    position: relative;
+    aspect-ratio: 1/1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    cursor: pointer;
+}
+
+.imgbox img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: var(--radius-sm);
+    transition: transform var(--transition-normal);
+}
+
+.imgbox:hover img { transform: scale(1.02); }
+
+.imgbox .video-overlay {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 20px;
+    color: white;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    pointer-events: none;
+    background: rgba(0,0,0,0.3);
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.imgbox .path {
+    font-size: 10px;
+    margin-top: var(--space-sm);
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.4;
+    font-family: 'SF Mono', Monaco, monospace;
+    pointer-events: none;
+}
+
+.imgbox .meta {
+    font-size: 10px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+    font-weight: 500;
+}
+
+.type-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-left: var(--space-xs);
+}
+
+.type-badge.video { background: #a78bfa; color: white; }
+.type-badge.photo { background: #60a5fa; color: white; }
+
+.imgbox .actions {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    transition: opacity var(--transition-fast);
+}
+
+.selection-mode .imgbox .actions {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.imgbox .actions .btn {
+    width: 100%;
+    padding: 6px;
+    font-size: 10px;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    box-shadow: none;
+}
+
+.imgbox .actions .btn-danger {
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid transparent;
+}
+
+.imgbox .actions .btn-danger:hover {
+    background: var(--danger-light);
+    color: var(--danger);
+    border-color: var(--danger-border);
+}
+
+/* Choice Indicator */
+.imgbox::after {
+    content: "";
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    width: 18px;
+    height: 18px;
+    border: 2px solid white;
+    background: rgba(255,255,255,0.2);
+    border-radius: 4px;
+    opacity: 0;
+    transition: all var(--transition-fast);
+    z-index: 10;
+    backdrop-filter: blur(2px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.1);
+}
+
+.selection-mode .imgbox:hover::after,
+.imgbox.delete-mark::after {
+    opacity: 1;
+}
+
+.imgbox.delete-mark::after {
+    background: var(--accent);
+    border-color: var(--accent);
+    content: "✓";
+    color: white;
+    font-size: 12px;
+    font-weight: 800;
+}
+
+.selection-mode .imgbox {
+    cursor: pointer;
+    user-select: none;
+}
+
+/* Kept Info in History */
+.kept-info {
+    margin-top: var(--space-xs);
+    padding: var(--space-xs) var(--space-sm);
+    background: var(--success-light);
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    color: #047857;
+    border: 1px solid var(--success-border);
+    display: inline-block;
+}
+
+.kept-info strong { font-weight: 600; }
+
+/* ========================================
+   Pagination
+   ======================================== */
+.pagination {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: var(--space-md);
+    margin: var(--space-lg) 0;
+    padding: var(--space-md);
+    background: var(--bg-secondary);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-color);
+}
+
+.pagination button {
+    padding: var(--space-sm) var(--space-lg);
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    cursor: pointer;
+    border-radius: var(--radius-full);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    transition: all var(--transition-fast);
+}
+
+.pagination button:hover:not(:disabled) {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+}
+
+.pagination button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.page-info {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.page-info span { font-weight: 600; color: var(--text-primary); }
+
+/* ========================================
+   Folder List
+   ======================================== */
+.folder-list {
+    max-height: 500px;
+    overflow-y: auto;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-color);
+}
+
+.folder-item {
+    padding: var(--space-md);
+    border-bottom: 1px solid var(--border-light);
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    transition: background var(--transition-fast);
+}
+
+.folder-item:last-child { border-bottom: none; }
+.folder-item:hover { background: var(--bg-tertiary); }
+
+.folder-item input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+    flex-shrink: 0;
+    accent-color: var(--accent);
+}
+
+.folder-item.kept {
+    background: var(--success-light);
+    border-left: 4px solid var(--success);
+}
+
+.folder-item.to-delete {
+    background: var(--danger-light);
+    border-left: 4px solid var(--danger);
+}
+
+.folder-path {
+    font-family: 'SF Mono', Monaco, monospace;
+    font-size: 12px;
+    word-break: break-all;
+    flex: 1;
+    color: var(--text-secondary);
+}
+
+.folder-count {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    padding: 4px 12px;
+    border-radius: var(--radius-full);
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.folder-count.delete-badge { 
+    background: var(--danger); 
+    color: white; 
+    box-shadow: 0 2px 4px rgba(244, 63, 94, 0.2);
+}
+.folder-count.keep-badge { 
+    background: var(--success); 
+    color: white; 
+    box-shadow: 0 2px 4px rgba(16, 185, 129, 0.2);
+}
+
+.folder-actions {
+    display: flex;
+    gap: var(--space-md);
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: var(--space-md);
+    padding: var(--space-md);
+    background: var(--bg-secondary);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-color);
+}
+
+.folder-actions .info {
+    font-size: 13px;
+    color: var(--text-secondary);
+    flex: 1;
+}
+
+.preview-box {
+    margin: var(--space-md) 0;
+    padding: var(--space-md);
+    background: var(--warning-light);
+    border: 1px solid #fcd34d;
+    border-radius: var(--radius-md);
+    font-size: 13px;
+}
+
+.preview-box strong { color: var(--warning); }
+
+/* ========================================
+   History Section
+   ======================================== */
+.history-folder-section { margin-bottom: var(--space-md); }
+
+.history-folder-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-md);
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-bottom: none;
+    cursor: pointer;
+    user-select: none;
+    transition: background var(--transition-fast);
+}
+
+.history-folder-header:hover { background: var(--border-color); }
+
+.history-folder-header .hist-folder-toggle {
+    font-size: 12px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    transition: transform var(--transition-fast);
+}
+
+.history-folder-header .hist-folder-toggle.open { transform: rotate(90deg); }
+.history-folder-header .hist-folder-label { flex: 1; word-break: break-all; }
+
+.history-folder-body {
+    border: 1px solid var(--border-color);
+    border-radius: 0 0 var(--radius-md) var(--radius-md);
+    overflow: hidden;
+    background: var(--bg-secondary);
+}
+
+.history-folder-body.collapsed { display: none; }
+
+.history-item {
+    padding: var(--space-md);
+    border-bottom: 1px solid var(--border-light);
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+}
+
+.history-item:last-child { border-bottom: none; }
+
+.history-item .hist-path {
+    font-family: 'SF Mono', Monaco, monospace;
+    font-size: 11px;
+    word-break: break-all;
+    flex: 1;
+    color: var(--text-secondary);
+}
+
+.history-item .hist-meta {
+    text-align: right;
+    white-space: nowrap;
+    margin-left: var(--space-md);
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+/* ========================================
+   Toast Notifications
+   ======================================== */
+.toast-container {
+    position: fixed;
+    top: var(--space-lg);
+    right: var(--space-lg);
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+.toast {
+    padding: var(--space-md) var(--space-lg);
+    border-radius: var(--radius-lg);
+    color: white;
+    font-size: 13px;
+    font-weight: 500;
+    box-shadow: var(--shadow-xl);
+    animation: toastSlide 0.3s ease;
+    max-width: 400px;
+    backdrop-filter: blur(8px);
+}
+
+.toast.success { background: var(--success); }
+.toast.error { background: var(--danger); }
+.toast.info { background: var(--accent); }
+
+@keyframes toastSlide {
+    from { opacity: 0; transform: translateX(20px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+
+/* ========================================
+   Scan Overlay
+   ======================================== */
+.scan-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(15, 23, 42, 0.8);
+    backdrop-filter: blur(4px);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.scan-box {
+    background: var(--bg-secondary);
+    padding: var(--space-xl) 48px;
+    border-radius: var(--radius-xl);
+    text-align: center;
+    max-width: 420px;
+    box-shadow: var(--shadow-xl);
+}
+
+.scan-box h2 {
+    margin-bottom: var(--space-sm);
+    color: var(--text-primary);
+}
+
+.scan-box .phase {
+    color: var(--text-secondary);
+    font-size: 14px;
+    margin-top: var(--space-sm);
+}
+
+.spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid var(--border-color);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: var(--space-md) auto;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ========================================
+   Empty State
+   ======================================== */
+.empty {
+    text-align: center;
+    padding: 60px var(--space-lg);
+    color: var(--text-muted);
+}
+
+.empty .icon {
+    font-size: 48px;
+    margin-bottom: var(--space-md);
+    opacity: 0.5;
+}
+
+.empty p { margin-top: var(--space-sm); }
+
+/* ========================================
+   Preview Section
+   ======================================== */
+.preview-summary-bar {
+    padding: var(--space-md) var(--space-lg);
+    background: var(--bg-secondary);
+    border-radius: var(--radius-lg);
+    margin-bottom: var(--space-md);
+    border: 1px solid var(--border-color);
+    font-size: 14px;
+    color: var(--text-secondary);
+}
+
+.preview-summary-bar strong { color: var(--text-primary); }
+
+.preview-folder-section {
+    background: var(--bg-secondary);
+    border-radius: var(--radius-lg);
+    margin-bottom: var(--space-md);
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+}
+
+.preview-folder-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    padding: var(--space-md);
+    cursor: pointer;
+    user-select: none;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-color);
+    transition: background var(--transition-fast);
+}
+
+.preview-folder-header:hover { background: var(--border-color); }
+
+.preview-folder-header .folder-toggle {
+    font-size: 12px;
+    color: var(--text-muted);
+    transition: transform var(--transition-fast);
+    flex-shrink: 0;
+}
+
+.preview-folder-header .folder-toggle.open { transform: rotate(90deg); }
+
+.preview-folder-header .folder-name {
+    font-family: 'SF Mono', Monaco, monospace;
+    font-size: 12px;
+    word-break: break-all;
+    flex: 1;
+    color: var(--text-primary);
+}
+
+.preview-folder-header .folder-badge {
+    background: var(--danger);
+    color: white;
+    padding: 4px 12px;
+    border-radius: var(--radius-full);
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.preview-folder-header .folder-check-toggle {
+    padding: 6px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-full);
+    font-size: 11px;
+    cursor: pointer;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    white-space: nowrap;
+    transition: all var(--transition-fast);
+}
+
+.preview-folder-header .folder-check-toggle:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+.preview-folder-body { padding: var(--space-md); }
+.preview-folder-body.collapsed { display: none; }
+
+.preview-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, 120px);
+    grid-auto-rows: 180px;
+    gap: var(--space-md);
+    justify-content: start;
+}
+
+.preview-card {
+    border: 1px solid var(--border-color);
+    padding: 8px;
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+    transition: all var(--transition-normal);
+    position: relative;
+    overflow: hidden;
+    width: 120px;
+    height: 180px;
+    display: flex;
+    flex-direction: column;
+}
+
+.preview-card:not(.unchecked) {
+    border-color: var(--danger);
+    background: var(--danger-light);
+    box-shadow: 0 0 0 1px var(--danger);
+}
+
+.preview-card.unchecked {
+    opacity: 0.6;
+    filter: grayscale(0.5);
+}
+
+.preview-card .pc-checkbox {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 5;
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: var(--danger);
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,0.1));
+}
+
+.preview-card .pc-thumb {
+    width: 100%;
+    aspect-ratio: 1/1;
+    object-fit: cover;
+    border-radius: var(--radius-sm);
+    display: block;
+    background: var(--bg-tertiary);
+}
+
+.preview-card .pc-name {
+    font-size: 10px;
+    margin-top: var(--space-xs);
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.3;
+    font-family: 'SF Mono', Monaco, monospace;
+}
+
+.preview-card .pc-meta {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 2px;
+    font-weight: 500;
+}
+
+.preview-card .video-badge {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 20px;
+    color: white;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    pointer-events: none;
+}
+
+.preview-bottom-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 200;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border-color);
+    padding: var(--space-md) var(--space-xl);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    box-shadow: 0 -4px 20px rgba(0,0,0,0.08);
+}
+
+.preview-bottom-bar .pbb-info {
+    font-size: 14px;
+    color: var(--text-secondary);
+}
+
+.preview-bottom-bar .pbb-info strong { color: var(--text-primary); }
+.preview-bottom-bar .pbb-actions { display: flex; gap: var(--space-md); }
+
+/* ========================================
+   Modal
+   ======================================== */
+.modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(15, 23, 42, 0.95);
+    backdrop-filter: blur(8px);
+    z-index: 11000;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+}
+
+.modal.active { display: flex; }
+
+.modal-close {
+    position: absolute;
+    top: var(--space-lg);
+    right: var(--space-xl);
+    color: white;
+    font-size: 36px;
+    cursor: pointer;
+    user-select: none;
+    opacity: 0.8;
+    transition: opacity var(--transition-fast);
+}
+
+.modal-close:hover { opacity: 1; }
+
+.modal-content {
+    max-width: 95%;
+    max-height: 80%;
+    object-fit: contain;
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-xl);
+}
+
+.modal-caption {
+    color: rgba(255,255,255,0.8);
+    margin-top: var(--space-lg);
+    font-size: 13px;
+    text-align: center;
+    word-break: break-all;
+    max-width: 80%;
+    font-family: 'SF Mono', Monaco, monospace;
+}
+
+.modal-actions {
+    margin-top: var(--space-md);
+    display: flex;
+    gap: var(--space-md);
+}
+
+/* ========================================
+   Smart Search Specific
+   ======================================== */
+#smart-search input[type="text"] {
+    flex: 1;
+    padding: var(--space-md);
+    border: 2px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    font-size: 16px;
+    font-family: inherit;
+    outline: none;
+    transition: all var(--transition-fast);
+}
+
+#smart-search input[type="text"]:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 4px var(--accent-light);
+}
+
+#smart-status {
+    margin-top: var(--space-md);
+    font-size: 13px;
+    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius-md);
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+#smart-progress-container {
+    max-width: 400px;
+    margin: var(--space-md) auto;
+}
+
+#smart-progress-container > div:first-child {
+    height: 6px;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-full);
+    overflow: hidden;
+}
+
+#smart-progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), #a78bfa);
+    border-radius: var(--radius-full);
+    transition: width var(--transition-normal);
+}
+
+/* ========================================
+   Responsive Adjustments
+   ======================================== */
+/* ========================================
+   Cleanup Sub-tabs
+   ======================================== */
+.cleanup-sub-tabs {
+    display: flex;
+    gap: var(--space-xs);
+    padding: var(--space-xs);
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-md);
+    width: fit-content;
+    margin-bottom: var(--space-lg);
+}
+
+.cleanup-sub-tab {
+    padding: var(--space-sm) var(--space-md);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    transition: all var(--transition-fast);
+}
+
+.cleanup-sub-tab:hover {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
+.cleanup-sub-tab.active {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    box-shadow: var(--shadow-sm);
+}
+
+.cleanup-view { display: none; }
+.cleanup-view.active { display: block; }
+
+/* ========================================
+   Responsive Adjustments
+   ======================================== */
+@media (max-width: 768px) {
+    body { padding: var(--space-md); }
+    
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    
+    .tabs { overflow-x: auto; flex-wrap: nowrap; }
+    
+    .action-bar {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    
+    .action-bar .controls {
+        justify-content: center;
+    }
+    
+    .images {
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    }
+}
 </style>
 </head>
 <body>
@@ -1423,24 +2617,37 @@ select.sort-select{padding:7px 10px;font-size:13px;border-radius:6px;border:1px 
   </div>
 </div>
 
-<h1>Duplicate Photo &amp; Video Finder</h1>
+<header style="display:flex; justify-content:space-between; align-items:center; margin-bottom: var(--space-lg); flex-wrap: wrap; gap: var(--space-md);">
+  <h1>Photo Clean-Up</h1>
+  <div id="path-selector" style="display:flex; align-items:center; gap:var(--space-md);">
+    <div style="display:flex; align-items:center; gap:var(--space-sm); background:var(--bg-secondary); padding:var(--space-sm) var(--space-md); border-radius:var(--radius-lg); border:1px solid var(--border-color); box-shadow:var(--shadow-sm);">
+      <span style="font-size:12px; color:var(--text-secondary); font-weight:500;">Scanning:</span>
+      <span id="current-root-path" style="font-family:'SF Mono', Monaco, monospace; font-size:12px; color:var(--text-primary); max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Loading...">...</span>
+      <button class="btn btn-secondary" id="btn-change-root" style="padding: 4px 10px; font-size: 11px;">Change</button>
+    </div>
+    <button class="btn btn-secondary" id="btn-toggle-selection-mode" style="padding: 10px 16px; font-size: 13px; font-weight: 600; min-width: 140px; justify-content: center;">
+      <span id="selection-mode-icon">🔳</span> Bulk Edit
+    </button>
+  </div>
+</header>
 
 <div class="stats" id="stats-bar">
-  <div class="stat-box"><h3>Duplicate Groups</h3><div class="value" id="stat-groups">--</div></div>
-  <div class="stat-box"><h3>Duplicate Photos</h3><div class="value" id="stat-photos">--</div></div>
-  <div class="stat-box"><h3>Duplicate Videos</h3><div class="value" id="stat-videos">--</div></div>
+  <div class="stat-box"><h3>Duplicates</h3><div class="value" id="stat-groups">--</div></div>
   <div class="stat-box"><h3>Wasted Space</h3><div class="value" id="stat-wasted">--</div></div>
-  <div class="stat-box green"><h3>Space Saved</h3><div class="value" id="stat-saved">--</div></div>
+  <div class="stat-box green"><h3>Total Saved</h3><div class="value" id="stat-saved">--</div></div>
+  <div class="stat-box"><h3>Images Deleted</h3><div class="value" id="stat-images-deleted">--</div></div>
+  <div class="stat-box"><h3>Videos Deleted</h3><div class="value" id="stat-videos-deleted">--</div></div>
+  <div class="stat-box"><h3>Image Space Saved</h3><div class="value" id="stat-images-saved">--</div></div>
+  <div class="stat-box"><h3>Video Space Saved</h3><div class="value" id="stat-videos-saved">--</div></div>
 </div>
 
 <div class="tabs">
-  <button class="tab active" data-tab="visual">Visual View</button>
-  <button class="tab" data-tab="folders">By Folder</button>
-  <button class="tab" data-tab="all-media">All Media</button>
-  <button class="tab" data-tab="empty-folders">Empty Folders</button>
-  <button class="tab" data-tab="small-files">Small Files / Screenshot Cleanup</button>
-  <button class="tab" data-tab="history">Deleted Files</button>
-  <button class="tab" data-tab="smart-search" style="background:#e0f7fa; color:#006064;">&#10024; Smart Search</button>
+  <button class="tab active" data-tab="visual">🔍 Duplicates</button>
+  <button class="tab" data-tab="folders">📁 By Folder</button>
+  <button class="tab" data-tab="all-media">🖼️ Browse All</button>
+  <button class="tab" data-tab="cleanup">🧹 Cleanup</button>
+  <button class="tab" data-tab="history">📋 History</button>
+  <button class="tab smart-tab" data-tab="smart-search">✨ AI Search</button>
 </div>
 
 <!-- Visual View -->
@@ -1507,7 +2714,7 @@ select.sort-select{padding:7px 10px;font-size:13px;border-radius:6px;border:1px 
     </div>
   </div>
   
-  <div id="all-media-container" class="images" style="margin-top:20px; display:flex; gap:12px; flex-wrap:wrap"></div>
+  <div id="all-media-container" class="images" style="margin-top:20px;"></div>
 
   <div class="pagination" id="all-media-pagination" style="display:none; margin-top:20px">
     <button id="btn-all-media-prev">&laquo; Previous</button>
@@ -1516,61 +2723,68 @@ select.sort-select{padding:7px 10px;font-size:13px;border-radius:6px;border:1px 
   </div>
 </div>
 
-<!-- Empty Folders -->
-<div id="empty-folders" class="tab-content">
-  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px">
-    <div>
-      <h2 style="margin-bottom:2px">Empty Folders</h2>
-      <p style="color:#888;font-size:13px">Folders that contain no files (ignoring .DS_Store).</p>
-    </div>
-    <button class="btn btn-primary" id="btn-refresh-empty">Refresh List</button>
+<!-- Cleanup (Combined Empty Folders + Small Files) -->
+<div id="cleanup" class="tab-content">
+  <div class="cleanup-sub-tabs" style="display:flex; gap:8px; margin-bottom:20px; padding:4px; background:var(--bg-tertiary); border-radius:var(--radius-md); width:fit-content;">
+    <button class="cleanup-sub-tab active" data-cleanup-tab="empty-folders-view">📂 Empty Folders</button>
+    <button class="cleanup-sub-tab" data-cleanup-tab="small-files-view">📄 Small Files</button>
   </div>
-  
-  <div class="folder-actions" id="empty-folder-actions" style="display:none">
-    <div class="info"><span id="empty-folder-selected-count">0</span> folder(s) selected</div>
-    <button class="btn btn-lg btn-danger" id="btn-delete-empty" disabled>Delete Selected Folders</button>
-  </div>
-  
-  <div id="empty-folder-list" class="folder-list"></div>
-</div>
 
-<!-- Small Files -->
-<div id="small-files" class="tab-content">
-  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap: wrap; gap: 10px;">
-    <div>
-      <h2 style="margin-bottom:2px">Small Files / Screenshots</h2>
-      <p style="color:#888;font-size:13px">Find all images and videos smaller than a specific size.</p>
+  <!-- Empty Folders Sub-view -->
+  <div id="empty-folders-view" class="cleanup-view active">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px">
+      <div>
+        <h2 style="margin-bottom:2px">Empty Folders</h2>
+        <p style="color:var(--text-secondary);font-size:13px">Folders that contain no files (ignoring .DS_Store).</p>
+      </div>
+      <button class="btn btn-primary" id="btn-refresh-empty">Scan Now</button>
     </div>
-    <div style="display:flex; align-items:center; gap:8px">
-        <label style="font-size:13px">Min (MB):</label>
-        <input type="number" id="small-files-min-size" value="0.0" step="0.1" min="0" style="width:70px; padding:6px; border:1px solid #ccc; border-radius:6px">
-        
-        <label style="font-size:13px">Max (MB):</label>
-        <input type="number" id="small-files-size" value="0.5" step="0.1" min="0" style="width:70px; padding:6px; border:1px solid #ccc; border-radius:6px">
+    
+    <div class="folder-actions" id="empty-folder-actions" style="display:none">
+      <div class="info"><span id="empty-folder-selected-count">0</span> folder(s) selected</div>
+      <button class="btn btn-lg btn-danger" id="btn-delete-empty" disabled>Delete Selected</button>
+    </div>
+    
+    <div id="empty-folder-list" class="folder-list"></div>
+  </div>
+
+  <!-- Small Files Sub-view -->
+  <div id="small-files-view" class="cleanup-view" style="display:none">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap: wrap; gap: 10px;">
+      <div>
+        <h2 style="margin-bottom:2px">Small Files / Screenshots</h2>
+        <p style="color:var(--text-secondary);font-size:13px">Find and remove images smaller than a specific size.</p>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px">
+        <label style="font-size:13px; color:var(--text-secondary)">Min:</label>
+        <input type="number" id="small-files-min-size" value="0.0" step="0.1" min="0" style="width:60px; padding:6px 10px; border:1px solid var(--border-color); border-radius:var(--radius-full); font-size:13px;">
+        <label style="font-size:13px; color:var(--text-secondary)">Max (MB):</label>
+        <input type="number" id="small-files-size" value="0.5" step="0.1" min="0" style="width:60px; padding:6px 10px; border:1px solid var(--border-color); border-radius:var(--radius-full); font-size:13px;">
         <button class="btn btn-primary" id="btn-refresh-small">Search</button>
+      </div>
     </div>
-  </div>
-  
-  <div class="action-bar" id="small-files-actions" style="display:none">
-    <div class="summary">
-      <span id="small-selected-count">0</span> files marked for deletion
-      (<span id="small-selected-size">0 B</span>)
+    
+    <div class="action-bar" id="small-files-actions" style="display:none">
+      <div class="summary">
+        <span id="small-selected-count">0</span> files marked for deletion
+        (<span id="small-selected-size">0 B</span>)
+      </div>
+      <div class="controls">
+        <label style="font-size:12px; cursor:pointer; margin-right:8px; color:var(--text-secondary)"><input type="checkbox" id="small-files-autoselect" checked> Auto-select</label>
+        <button class="btn btn-secondary" id="btn-small-clear-kept">Clear Kept (<span id="small-kept-count">0</span>)</button>
+        <button class="btn btn-primary" id="btn-small-select-all">Select All</button>
+        <button class="btn btn-danger" id="btn-small-delete-marked" disabled>Delete Marked</button>
+        <button class="btn btn-secondary" id="btn-small-reset">Reset</button>
+      </div>
     </div>
-    <div class="controls">
-      <label style="font-size:12px; cursor:pointer; margin-right:8px"><input type="checkbox" id="small-files-autoselect" checked> Auto-select (skips Kept)</label>
-      <button class="btn btn-secondary" id="btn-small-clear-kept">Clear Kept List (<span id="small-kept-count">0</span>)</button>
-      <button class="btn btn-primary" id="btn-small-select-all">Select All</button>
-      <button class="btn btn-danger" id="btn-small-delete-marked" disabled>Delete Marked</button>
-      <button class="btn btn-secondary" id="btn-small-reset">Reset</button>
-    </div>
-  </div>
-  
-  <div id="small-files-container" class="images" style="margin-top:20px; display:flex; gap:12px; flex-wrap:wrap"></div>
+    
+    <div id="small-files-container" class="images" style="margin-top:20px;"></div>
 
-  <div class="pagination" id="small-files-pagination" style="display:none; margin-top:20px">
-    <button id="btn-small-prev">&laquo; Previous</button>
-    <span class="page-info">Page <span id="small-cur-page">1</span> of <span id="small-total-pages">1</span></span>
-    <button id="btn-small-next">Next &raquo;</button>
+    <div class="pagination" id="small-files-pagination" style="display:none; margin-top:20px">
+      <button id="btn-small-prev">&laquo; Previous</button>
+      <span class="page-info">Page <span id="small-cur-page">1</span> of <span id="small-total-pages">1</span></span>
+      <button id="btn-small-next">Next &raquo;</button>
+    </div>
   </div>
 </div>
 
@@ -1610,7 +2824,7 @@ select.sort-select{padding:7px 10px;font-size:13px;border-radius:6px;border:1px 
     </div>
   </div>
 
-  <div id="smart-results" class="images" style="display:flex; gap:12px; flex-wrap:wrap; justify-content:center;"></div>
+  <div id="smart-results" class="images"></div>
 </div>
 
 <!-- History -->
@@ -1705,10 +2919,12 @@ async function refreshStats(){
   try {
       const s = await apiGet('/api/stats');
       document.getElementById('stat-groups').textContent = s.total_groups ?? 0;
-      document.getElementById('stat-photos').textContent = s.total_photos ?? 0;
-      document.getElementById('stat-videos').textContent = s.total_videos ?? 0;
       document.getElementById('stat-wasted').textContent = s.wasted_space_human ?? '0 B';
       document.getElementById('stat-saved').textContent = s.space_saved_human ?? '0 B';
+      document.getElementById('stat-images-deleted').textContent = s.images_deleted ?? 0;
+      document.getElementById('stat-videos-deleted').textContent = s.videos_deleted ?? 0;
+      document.getElementById('stat-images-saved').textContent = s.space_saved_images_human ?? '0 B';
+      document.getElementById('stat-videos-saved').textContent = s.space_saved_videos_human ?? '0 B';
   } catch (e) {
       console.error("Stats fetch failed:", e);
       throw e;
@@ -2177,8 +3393,86 @@ function resetAll(){
   updateSummary();
 }
 
+// ---------------------------------------------------------------------------
+// Selection Mode & Bulk Actions
+// ---------------------------------------------------------------------------
+let isSelectionMode = false;
+let lastSelectedObj = null; // { containerId, index, path }
+
+function toggleSelectionMode() {
+    isSelectionMode = !isSelectionMode;
+    document.body.classList.toggle('selection-mode', isSelectionMode);
+    const btn = document.getElementById('btn-toggle-selection-mode');
+    if (isSelectionMode) {
+        btn.classList.add('btn-primary');
+        btn.classList.remove('btn-secondary');
+        btn.innerHTML = '<span id="selection-mode-icon">✅</span> Exit Edit';
+        showToast("Edit Mode: Click to select, Shift+Click for range");
+    } else {
+        btn.classList.remove('btn-primary');
+        btn.classList.add('btn-secondary');
+        btn.innerHTML = '<span id="selection-mode-icon">🔳</span> Bulk Edit';
+    }
+}
+
+function handleItemClick(e, box, containerId) {
+    const path = box.dataset.path || box.dataset.allPath || box.dataset.smallPath || box.dataset.smartPath;
+    const size = parseInt(box.dataset.size) || 0;
+    const container = document.getElementById(containerId);
+    const allBoxes = Array.from(container.querySelectorAll('.imgbox'));
+    const currentIndex = allBoxes.indexOf(box);
+
+    // Helper to toggle mark
+    const toggleMark = (targetBox, shouldMark) => {
+        const itemPath = targetBox.dataset.path || targetBox.dataset.allPath || targetBox.dataset.smallPath || targetBox.dataset.smartPath;
+        const itemSize = parseInt(targetBox.dataset.size) || 0;
+        
+        // Use the appropriate map based on containerId
+        let targetMap = markedForDeletion;
+        if(containerId === 'all-media-container') targetMap = markedAllMedia;
+        else if(containerId === 'small-files-container') targetMap = markedSmallFiles;
+        else if(containerId === 'smart-results') targetMap = smartSelected;
+
+        if (shouldMark === undefined) shouldMark = !targetMap.has(itemPath);
+
+        if (shouldMark) {
+            targetBox.classList.add('delete-mark');
+            if (targetMap instanceof Set) targetMap.add(itemPath);
+            else targetMap.set(itemPath, itemSize);
+            if (containerId === 'small-files-container') keptSmallFiles.delete(itemPath);
+        } else {
+            targetBox.classList.remove('delete-mark');
+            targetMap.delete(itemPath);
+            if (containerId === 'small-files-container') keptSmallFiles.add(itemPath);
+        }
+    };
+
+    if (e.shiftKey && lastSelectedObj && lastSelectedObj.containerId === containerId) {
+        const start = Math.min(lastSelectedObj.index, currentIndex);
+        const end = Math.max(lastSelectedObj.index, currentIndex);
+        const alreadyMarked = markedForDeletion.has(path) || markedAllMedia.has(path) || markedSmallFiles.has(path) || smartSelected.has(path);
+        
+        for (let i = start; i <= end; i++) {
+            toggleMark(allBoxes[i], true);
+        }
+    } else {
+        toggleMark(box);
+    }
+
+    lastSelectedObj = { containerId, index: currentIndex, path };
+    
+    // Update relevant summaries
+    if(containerId === 'all-media-container') updateAllMediaSummary();
+    else if(containerId === 'small-files-container') updateSmallSelectedCount();
+    else if(containerId === 'smart-results') updateSmartActions();
+    else updateSummary();
+}
+
 // ----- Event delegation -----
 document.addEventListener('click',function(e){
+  // Cache closest imgbox for multi-use
+  const box = e.target.closest('.imgbox');
+
   // 1. Group Collapse/Expand (Priority)
   // Check closest header, ignore button clicks inside it
   const groupHeader = e.target.closest('[data-group-toggle]');
@@ -2215,10 +3509,39 @@ document.addEventListener('click',function(e){
     
     // Refresh data if switching to specific tabs
     if(id === 'history') loadHistory();
-    if(id === 'empty-folders') loadEmptyFolders();
+    if(id === 'cleanup') {
+      // Check which sub-tab is active and load accordingly
+      const activeSubTab = document.querySelector('.cleanup-sub-tab.active');
+      if(activeSubTab && activeSubTab.dataset.cleanupTab === 'small-files-view') {
+        loadSmallFiles();
+      } else {
+        loadEmptyFolders();
+      }
+    }
     if(id === 'all-media') loadAllMedia();
-    if(id === 'small-files') loadSmallFiles();
     if(id === 'smart-search') checkSmartStatus();
+    return;
+  }
+
+  // Cleanup sub-tab switching
+  if(e.target.matches('.cleanup-sub-tab')){
+    const subTabId = e.target.dataset.cleanupTab;
+    document.querySelectorAll('.cleanup-sub-tab').forEach(t=>t.classList.remove('active'));
+    document.querySelectorAll('.cleanup-view').forEach(v=>v.classList.remove('active'));
+    
+    e.target.classList.add('active');
+    const view = document.getElementById(subTabId);
+    if(view) {
+      view.classList.add('active');
+      view.style.display = 'block';
+    }
+    
+    // Hide the other view
+    document.querySelectorAll('.cleanup-view:not(.active)').forEach(v=>v.style.display = 'none');
+    
+    // Load data for the selected sub-tab
+    if(subTabId === 'empty-folders-view') loadEmptyFolders();
+    if(subTabId === 'small-files-view') loadSmallFiles();
     return;
   }
 
@@ -2228,21 +3551,24 @@ document.addEventListener('click',function(e){
     return;
   }
 
-  // Open Full Res from ANY imgbox
-  const imgInBox = e.target.closest('.imgbox img');
-  if(imgInBox){
-    const box = imgInBox.closest('.imgbox');
-    // Try different data attributes used in different tabs
-    const path = box.dataset.fullPath || box.dataset.path || box.dataset.smallPath;
-    const type = box.dataset.type || (box.querySelector('.type-badge.video') ? 'video' : 'photo');
-    if(path) {
-        openFullRes(path, type);
-        return;
+  // Handle imgbox clicks (Main Logic for Select/Preview)
+  if(box && !e.target.closest('button')) {
+    // Determine which container we are in
+    const container = box.closest('.images');
+    const containerId = container ? container.id : null;
+
+    if (isSelectionMode) {
+      if(containerId) handleItemClick(e, box, containerId);
+    } else {
+      // If NOT in selection mode, clicking opens full res
+      const path = box.dataset.fullPath || box.dataset.path || box.dataset.allPath || box.dataset.smallPath || box.dataset.smartPath;
+      const type = box.dataset.type || (box.querySelector('.type-badge.video') ? 'video' : 'photo');
+      if(path) openFullRes(path, type);
     }
+    return;
   }
 
   // 3. Group Actions (Keep, Delete, Reset)
-  const box = e.target.closest('.imgbox');
   if(e.target.matches('[data-action="keep"]') && box){
     box.classList.add('keep');box.classList.remove('delete-mark');
     markedForDeletion.delete(box.dataset.path);
@@ -2311,6 +3637,11 @@ document.addEventListener('click',function(e){
   // 7. Visual preview: confirm delete
   if(e.target.id==='btn-confirm-preview-delete'){
     executePreviewDelete();
+    return;
+  }
+  // 8. Toggle Selection Mode
+  if(e.target.id === 'btn-toggle-selection-mode' || e.target.closest('#btn-toggle-selection-mode')){
+    toggleSelectionMode();
     return;
   }
 });
@@ -2421,10 +3752,6 @@ async function loadAllMedia() {
           </div>
           <div class="path" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</div>
           <div class="meta">${f.size_human} ${f.type === 'video' ? '<span class="type-badge video">VIDEO</span>' : '<span class="type-badge photo">PHOTO</span>'}</div>
-          <div class="actions" style="margin-top:8px; display:flex; gap:4px">
-            <button class="btn btn-delete btn-action" data-action="all-media-mark" style="flex:1; padding:4px; font-size:11px">Mark</button>
-            <button class="btn btn-danger btn-action" data-action="all-media-delete-now" style="flex:1; padding:4px; font-size:11px">Delete</button>
-          </div>
         </div>`;
     });
     container.innerHTML = html;
@@ -2812,8 +4139,8 @@ function renderSmartResults(results, titleOverride=null) {
         // Let's simpler: just show score.
         const score = f.score.toFixed(3);
         
-        html += `<div class="imgbox" data-path="${escapeHtml(f.path)}" data-smart-path="${escapeHtml(f.path)}">`;
-        html += `<div class="thumb-container" onclick="toggleSmartSelect('${escapeHtml(f.path).replace(/'/g, "\\'")}')">`;
+        html += `<div class="imgbox" data-path="${escapeHtml(f.path)}" data-smart-path="${escapeHtml(f.path)}" data-size="${f.size}">`;
+        html += `<div class="thumb-container">`;
         html += `<img src="/thumbnails/${f.thumbnail}" loading="lazy" alt="">`;
         if (f.type === 'video') html += `<div class="video-overlay">&#9654;</div>`;
         html += `</div>`;
@@ -2875,6 +4202,37 @@ async function deleteSmartSelected() {
 // ----- Init -----
 document.addEventListener('DOMContentLoaded', async () => {
     console.log("App initializing...");
+    
+    // Config and Path Selection
+    async function refreshConfig() {
+        try {
+            const config = await apiGet('/api/config');
+            document.getElementById('current-root-path').textContent = config.root_dir;
+            document.getElementById('current-root-path').title = config.root_dir;
+        } catch (e) { console.error("Config fetch failed", e); }
+    }
+    
+    document.getElementById('btn-change-root').onclick = async () => {
+        const currentPath = document.getElementById('current-root-path').textContent;
+        const newPath = prompt("Enter the full folder path to scan:", currentPath);
+        if (newPath && newPath !== currentPath) {
+            try {
+                const resp = await apiPost('/api/config', { root_dir: newPath });
+                if (resp.success) {
+                    showToast("Scanning new directory...");
+                    await refreshConfig();
+                    await pollScan();
+                } else {
+                    showToast(resp.error || "Failed to change directory", "error");
+                }
+            } catch (e) {
+                showToast("Error updating directory", "error");
+            }
+        }
+    };
+    
+    await refreshConfig();
+
     
     // Smart Search Bindings
     if(document.getElementById('btn-smart-index')) {

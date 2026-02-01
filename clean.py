@@ -35,14 +35,18 @@ PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".webp", ".gif", ".bmp", ".tiff"
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".wmv", ".flv", ".webm", ".3gp"}
 ALL_MEDIA_EXTS = PHOTO_EXTS | VIDEO_EXTS
 
-ROOT_DIR = os.path.expanduser("~/Pictures") # Default directory to scan
-PORT = 8080
-THUMB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thumbnails")
+# Data directory - configurable for Docker deployments
+DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+# File paths - use DATA_DIR for all persistent data
+THUMB_DIR = os.path.join(DATA_DIR, "thumbnails")
 THUMB_SIZE = (150, 150)
 THUMB_QUALITY = 50
-HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deletion_history.json")
+HISTORY_FILE = os.path.join(DATA_DIR, "deletion_history.json")
+SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 PARTIAL_HASH_SIZE = 8192  # 8 KB for partial hashing
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
@@ -60,12 +64,22 @@ def save_settings(settings):
     except Exception as e:
         print(f"Failed to save settings: {e}")
 
+# Priority order for ROOT_DIR: ENV > settings.json > default
 _settings = load_settings()
-ROOT_DIR = os.path.expanduser(_settings.get("root_dir", "~/Pictures"))
+ROOT_DIR = os.getenv("ROOT_DIR")  # ENV variable takes precedence
+if not ROOT_DIR:
+    ROOT_DIR = _settings.get("root_dir", "~/Pictures")  # Fallback to settings.json
+ROOT_DIR = os.path.expanduser(ROOT_DIR)
+
 # Ensure ROOT_DIR exists
 if not os.path.isdir(ROOT_DIR):
-    ROOT_DIR = os.path.expanduser("~/Pictures")
+    fallback = os.path.expanduser("~/Pictures")
+    print(f"Warning: ROOT_DIR '{ROOT_DIR}' does not exist. Falling back to {fallback}")
+    ROOT_DIR = fallback
 ROOT_DIR = os.path.abspath(ROOT_DIR)
+
+# Priority order for PORT: ENV > default
+PORT = int(os.getenv("PORT", "8080"))
 
 # ---------------------------------------------------------------------------
 # Global state
@@ -119,7 +133,7 @@ def load_history():
 def enrich_history_from_index():
     """Use all_files_index.json to find 'kept' versions for old history entries."""
     global deletion_history
-    index_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "all_files_index.json")
+    index_path = os.path.join(DATA_DIR, "all_files_index.json")
     if not os.path.exists(index_path):
         return 0
         
@@ -333,7 +347,7 @@ def run_scan():
     print(f"  {total_scanned} files scanned, {candidates_after_p1} candidates in {len(size_groups)} size groups")
 
     # Save full file index
-    all_files_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "all_files_index.json")
+    all_files_path = os.path.join(DATA_DIR, "all_files_index.json")
     try:
         with open(all_files_path, 'w') as f:
             json.dump(all_files, f, indent=2)
@@ -550,7 +564,7 @@ class SemanticSearch:
         self.processor = None
         self.device = "cpu"
         self.embeddings = {}  # path -> embedding (list)
-        self.embeddings_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "image_embeddings.json")
+        self.embeddings_file = os.path.join(DATA_DIR, "image_embeddings.json")
         self.is_loading = False
         self.is_indexing = False
         self.index_progress = {"current": 0, "total": 0, "status": "idle"}
@@ -1284,7 +1298,7 @@ def api_semantic_index():
 def api_all_files():
     global all_media_files
     if not all_media_files:
-        all_files_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "all_files_index.json")
+        all_files_path = os.path.join(DATA_DIR, "all_files_index.json")
         if os.path.exists(all_files_path):
             try:
                 with open(all_files_path, 'r') as f:
@@ -4730,7 +4744,7 @@ if __name__ == "__main__":
     os.makedirs(THUMB_DIR, exist_ok=True)
     
     # Pre-load index if it exists
-    index_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "all_files_index.json")
+    index_path = os.path.join(DATA_DIR, "all_files_index.json")
     if os.path.exists(index_path):
         try:
             with open(index_path, 'r') as f:
@@ -4747,12 +4761,30 @@ if __name__ == "__main__":
     scan_thread = threading.Thread(target=run_scan, daemon=True)
     scan_thread.start()
 
-    # Open browser after a short delay
-    def open_browser():
-        time.sleep(1.5)
-        webbrowser.open(f"http://localhost:{PORT}")
+    # Detect if running in Docker (don't open browser in container)
+    is_docker = os.path.exists("/.dockerenv") or os.getenv("RUNNING_IN_DOCKER") == "true"
+    
+    # Open browser after a short delay (only if not in Docker)
+    if not is_docker:
+        def open_browser():
+            time.sleep(1.5)
+            webbrowser.open(f"http://localhost:{PORT}")
+        threading.Thread(target=open_browser, daemon=True).start()
 
-    threading.Thread(target=open_browser, daemon=True).start()
+    # Bind to 0.0.0.0 in Docker for external access, 127.0.0.1 otherwise
+    host = "0.0.0.0" if is_docker else "127.0.0.1"
+    
+    # Use production WSGI server in Docker, development server otherwise
+    if is_docker:
+        try:
+            from waitress import serve
+            print(f"Starting production server on http://{host}:{PORT}")
+            serve(app, host=host, port=PORT, threads=4, channel_timeout=300)
+        except ImportError:
+            print("WARNING: waitress not installed, falling back to development server")
+            print(f"Starting server on http://{host}:{PORT}")
+            app.run(host=host, port=PORT, debug=False, threaded=True)
+    else:
+        print(f"Starting server on http://{host}:{PORT}")
+        app.run(host=host, port=PORT, debug=False, threaded=True)
 
-    print(f"Starting server on http://localhost:{PORT}")
-    app.run(host="127.0.0.1", port=PORT, debug=False, threaded=True)

@@ -1,0 +1,6 @@
+pillow==12.1.0
+flask>=3.0.0
+send2trash>=1.8.0
+pillow-heif>=0.10.0
+torch>=2.0.0
+transformers>=4.30.0

@@ -2064,70 +2064,320 @@ select.sort-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px va
 /* ========================================
    History Section
    ======================================== */
-.history-folder-section { margin-bottom: var(--space-md); }
+
+/* Statistics Grid */
+.history-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: var(--space-md);
+    margin-bottom: var(--space-lg);
+}
+
+.history-stat-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: var(--space-lg);
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    transition: all var(--transition-normal);
+    position: relative;
+    overflow: hidden;
+}
+
+.history-stat-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--primary), var(--accent));
+    opacity: 0;
+    transition: opacity var(--transition-normal);
+}
+
+.history-stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+    border-color: var(--primary-light);
+}
+
+.history-stat-card:hover::before {
+    opacity: 1;
+}
+
+.stat-icon {
+    width: 56px;
+    height: 56px;
+    border-radius: var(--radius-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    flex-shrink: 0;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+
+.stat-icon svg {
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.1));
+}
+
+.stat-content {
+    flex: 1;
+    min-width: 0;
+}
+
+.stat-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.stat-value {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--text-primary);
+    line-height: 1.2;
+}
+
+.stat-sublabel {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+/* Search and Filter Controls */
+.history-controls {
+    display: flex;
+    gap: var(--space-md);
+    margin-bottom: var(--space-lg);
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.history-search-box {
+    flex: 1;
+    min-width: 250px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 0 var(--space-md);
+    transition: all var(--transition-fast);
+}
+
+.history-search-box:focus-within {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.1);
+}
+
+.history-search-box svg {
+    color: var(--text-muted);
+    flex-shrink: 0;
+    margin-right: var(--space-sm);
+}
+
+.history-search-box input {
+    flex: 1;
+    border: none;
+    background: transparent;
+    padding: 10px 0;
+    font-size: 14px;
+    color: var(--text-primary);
+    outline: none;
+}
+
+.history-search-box input::placeholder {
+    color: var(--text-muted);
+}
+
+.history-filter-group {
+    display: flex;
+    gap: var(--space-sm);
+}
+
+.history-filter-select {
+    padding: 10px 14px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    outline: none;
+}
+
+.history-filter-select:hover {
+    border-color: var(--primary-light);
+}
+
+.history-filter-select:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.1);
+}
+
+/* History Folder Sections */
+.history-folder-section { 
+    margin-bottom: var(--space-md);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+    transition: all var(--transition-fast);
+}
+
+.history-folder-section:hover {
+    border-color: var(--primary-light);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+}
 
 .history-folder-header {
     display: flex;
     align-items: center;
     gap: var(--space-sm);
-    padding: var(--space-md);
+    padding: var(--space-md) var(--space-lg);
     background: var(--bg-tertiary);
-    border-radius: var(--radius-md) var(--radius-md) 0 0;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
-    border: 1px solid var(--border-color);
-    border-bottom: none;
     cursor: pointer;
     user-select: none;
     transition: background var(--transition-fast);
+    border-bottom: 1px solid var(--border-light);
 }
 
-.history-folder-header:hover { background: var(--border-color); }
-
-.history-folder-header .hist-folder-toggle {
-    font-size: 12px;
-    color: var(--text-muted);
-    flex-shrink: 0;
-    transition: transform var(--transition-fast);
-}
-
-.history-folder-header .hist-folder-toggle.open { transform: rotate(90deg); }
-.history-folder-header .hist-folder-label { flex: 1; word-break: break-all; }
-
-.history-folder-body {
-    border: 1px solid var(--border-color);
-    border-radius: 0 0 var(--radius-md) var(--radius-md);
-    overflow: hidden;
+.history-folder-header:hover { 
     background: var(--bg-secondary);
 }
 
-.history-folder-body.collapsed { display: none; }
-
-.history-item {
-    padding: var(--space-md);
-    border-bottom: 1px solid var(--border-light);
-    display: flex;
-    justify-content: space-between;
-    font-size: 13px;
+.history-folder-header .hist-folder-toggle {
+    font-size: 14px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    transition: transform var(--transition-fast);
+    display: inline-block;
 }
 
-.history-item:last-child { border-bottom: none; }
+.history-folder-header .hist-folder-toggle.open { 
+    transform: rotate(90deg);
+}
+
+.history-folder-header .hist-folder-label { 
+    flex: 1;
+    word-break: break-all;
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.history-folder-body {
+    background: var(--bg-secondary);
+    max-height: 600px;
+    overflow-y: auto;
+}
+
+.history-folder-body.collapsed { 
+    display: none;
+}
+
+/* History Items */
+.history-item {
+    padding: var(--space-md) var(--space-lg);
+    border-bottom: 1px solid var(--border-light);
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-md);
+    font-size: 13px;
+    transition: background var(--transition-fast);
+}
+
+.history-item:hover {
+    background: var(--bg-tertiary);
+}
+
+.history-item:last-child { 
+    border-bottom: none;
+}
+
+.history-item-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 18px;
+}
+
+.history-item-icon.photo {
+    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+    color: white;
+}
+
+.history-item-icon.video {
+    background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+    color: white;
+}
+
+.history-item-content {
+    flex: 1;
+    min-width: 0;
+}
 
 .history-item .hist-path {
     font-family: 'SF Mono', Monaco, monospace;
-    font-size: 11px;
+    font-size: 13px;
+    font-weight: 500;
     word-break: break-all;
-    flex: 1;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+    display: block;
+}
+
+.history-item .kept-info {
+    margin-top: var(--space-sm);
+    padding: var(--space-sm);
+    background: var(--bg-tertiary);
+    border-left: 3px solid var(--success);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
     color: var(--text-secondary);
+}
+
+.history-item .kept-info strong {
+    color: var(--success);
+    font-weight: 600;
 }
 
 .history-item .hist-meta {
     text-align: right;
     white-space: nowrap;
-    margin-left: var(--space-md);
     color: var(--text-muted);
+    font-size: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+}
+
+.history-item .hist-size {
+    font-weight: 600;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.history-item .hist-timestamp {
     font-size: 11px;
+    opacity: 0.8;
 }
 
 /* ========================================
@@ -2829,13 +3079,101 @@ select.sort-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px va
 
 <!-- History -->
 <div id="history" class="tab-content">
-  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px">
-    <div>
-      <h2 style="margin-bottom:2px">Deleted Files</h2>
-      <p style="color:#888;font-size:13px">Files moved to Trash. Total space recovered: <strong id="hist-total">0 B</strong></p>
+  <div style="margin-bottom:24px">
+    <h2 style="margin-bottom:8px">Deletion History</h2>
+    <p style="color:#888;font-size:13px;margin-bottom:20px">Track all files you've deleted and the space you've recovered</p>
+    
+    <!-- Statistics Cards -->
+    <div class="history-stats-grid">
+      <div class="history-stat-card">
+        <div class="stat-icon" style="background:linear-gradient(135deg, #667eea 0%, #764ba2 100%)">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+            <polyline points="17 21 17 13 7 13 7 21"/>
+            <polyline points="7 3 7 8 15 8"/>
+          </svg>
+        </div>
+        <div class="stat-content">
+          <div class="stat-label">Total Space Saved</div>
+          <div class="stat-value" id="hist-total-space">0 B</div>
+        </div>
+      </div>
+      
+      <div class="history-stat-card">
+        <div class="stat-icon" style="background:linear-gradient(135deg, #f093fb 0%, #f5576c 100%)">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+            <circle cx="8.5" cy="8.5" r="1.5"/>
+            <polyline points="21 15 16 10 5 21"/>
+          </svg>
+        </div>
+        <div class="stat-content">
+          <div class="stat-label">Images Deleted</div>
+          <div class="stat-value" id="hist-images-count">0</div>
+          <div class="stat-sublabel" id="hist-images-space">0 B saved</div>
+        </div>
+      </div>
+      
+      <div class="history-stat-card">
+        <div class="stat-icon" style="background:linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="23 7 16 12 23 17 23 7"/>
+            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+          </svg>
+        </div>
+        <div class="stat-content">
+          <div class="stat-label">Videos Deleted</div>
+          <div class="stat-value" id="hist-videos-count">0</div>
+          <div class="stat-sublabel" id="hist-videos-space">0 B saved</div>
+        </div>
+      </div>
+      
+      <div class="history-stat-card">
+        <div class="stat-icon" style="background:linear-gradient(135deg, #fa709a 0%, #fee140 100%)">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+          </svg>
+        </div>
+        <div class="stat-content">
+          <div class="stat-label">Total Files</div>
+          <div class="stat-value" id="hist-total-files">0</div>
+          <div class="stat-sublabel">Across all folders</div>
+        </div>
+      </div>
     </div>
-    <button class="btn btn-secondary" onclick="loadHistory()">Refresh &amp; Re-link</button>
   </div>
+  
+  <!-- Search and Filter Bar -->
+  <div class="history-controls">
+    <div class="history-search-box">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="11" cy="11" r="8"/>
+        <path d="m21 21-4.35-4.35"/>
+      </svg>
+      <input type="text" id="history-search" placeholder="Search by filename or folder..." />
+    </div>
+    <div class="history-filter-group">
+      <select id="history-filter" class="history-filter-select">
+        <option value="all">All Files</option>
+        <option value="images">Images Only</option>
+        <option value="videos">Videos Only</option>
+      </select>
+      <select id="history-sort" class="history-filter-select">
+        <option value="recent">Most Recent</option>
+        <option value="oldest">Oldest First</option>
+        <option value="size-desc">Largest First</option>
+        <option value="size-asc">Smallest First</option>
+      </select>
+    </div>
+    <button class="btn btn-secondary" onclick="loadHistory()" style="white-space:nowrap">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:6px">
+        <polyline points="23 4 23 10 17 10"/>
+        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+      </svg>
+      Refresh
+    </button>
+  </div>
+  
   <div id="history-list"></div>
 </div>
 
@@ -3178,79 +3516,180 @@ function getFolderFromPath(path){
   const i=Math.max(path.lastIndexOf('/'),path.lastIndexOf('\\'));
   return i<=0?path:path.slice(0,i);
 }
-async function loadHistory(){
-  const el=document.getElementById('history-list');
-  el.innerHTML = '<div class="empty"><div class="spinner"></div><p>Calculating file locations...</p></div>';
-  
-  try {
-      const data = await apiGet('/api/history?enrich=true');
-      document.getElementById('hist-total').textContent = formatSize(data.total_space_saved);
-      
-      if(!data.deletions || !data.deletions.length){
-          el.innerHTML = '<div class="empty"><p>No files deleted yet.</p></div>';
-          return;
-      }
-      
-      const items = [...data.deletions].reverse();
-      const byFolder = new Map();
-      items.forEach(d => {
-          const folder = getFolderFromPath(d.path);
-          if(!byFolder.has(folder)) byFolder.set(folder, []);
-          byFolder.get(folder).push(d);
-      });
-      
-      const folderOrder = [...byFolder.keys()];
-      el.innerHTML = folderOrder.map((folder, i) => {
-          const files = byFolder.get(folder);
-          const fileCount = files.length;
-          const folderSize = files.reduce((s, d) => s + (d.size || 0), 0);
-          const sizeHuman = formatSize(folderSize);
-          const sectionId = 'hist-section-' + i;
-          
-          let body = files.map(d => {
-              const dt = new Date(d.timestamp);
-              const ts = dt.toLocaleDateString() + ' ' + dt.toLocaleTimeString();
-              const fname = d.path ? d.path.split(/[/\\]/).pop() : 'Unknown';
-              
-              let keptHtml = '';
-              if (d.kept_versions && d.kept_versions.length > 0) {
-                  // If we have multiple, show first and a count
-                  const keptPath = d.kept_versions[0];
-                  const keptName = keptPath.split(/[/\\]/).pop();
-                  const keptFolder = getFolderFromPath(keptPath);
-                  const moreCount = d.kept_versions.length - 1;
-                  const moreText = moreCount > 0 ? ` (+${moreCount} other locations)` : '';
-                  
-                  keptHtml = `<div class="kept-info">
-                      <strong>Kept Original:</strong> ${escapeHtml(keptName)}${moreText}<br>
-                      <small style="opacity:0.8">Location: ${escapeHtml(keptFolder)}</small>
+async function loadHistory() {
+    const el = document.getElementById('history-list');
+    el.innerHTML = '<div class="empty"><div class="spinner"></div><p>Calculating file locations...</p></div>';
+
+    try {
+        const data = await apiGet('/api/history?enrich=true');
+
+        // Update statistics cards
+        const totalSpace = data.total_space_saved || 0;
+        const totalFiles = (data.deletions || []).length;
+
+        // Count images and videos
+        let imageCount = 0;
+        let videoCount = 0;
+        let imageSpace = 0;
+        let videoSpace = 0;
+
+        (data.deletions || []).forEach(d => {
+            const ext = (d.path || '').toLowerCase();
+            const isVideo = ext.endsWith('.mp4') || ext.endsWith('.mov') || ext.endsWith('.avi') ||
+                ext.endsWith('.mkv') || ext.endsWith('.m4v') || ext.endsWith('.wmv') ||
+                ext.endsWith('.flv') || ext.endsWith('.webm') || ext.endsWith('.3gp');
+
+            if (isVideo) {
+                videoCount++;
+                videoSpace += (d.size || 0);
+            } else {
+                imageCount++;
+                imageSpace += (d.size || 0);
+            }
+        });
+
+        document.getElementById('hist-total-space').textContent = formatSize(totalSpace);
+        document.getElementById('hist-images-count').textContent = imageCount.toLocaleString();
+        document.getElementById('hist-images-space').textContent = formatSize(imageSpace) + ' saved';
+        document.getElementById('hist-videos-count').textContent = videoCount.toLocaleString();
+        document.getElementById('hist-videos-space').textContent = formatSize(videoSpace) + ' saved';
+        document.getElementById('hist-total-files').textContent = totalFiles.toLocaleString();
+
+        if (!data.deletions || !data.deletions.length) {
+            el.innerHTML = '<div class="empty"><p>No files deleted yet.</p></div>';
+            return;
+        }
+
+        const items = [...data.deletions].reverse();
+        const byFolder = new Map();
+        items.forEach(d => {
+            const folder = getFolderFromPath(d.path);
+            if (!byFolder.has(folder)) byFolder.set(folder, []);
+            byFolder.get(folder).push(d);
+        });
+
+        const folderOrder = [...byFolder.keys()];
+        el.innerHTML = folderOrder.map((folder, i) => {
+            const files = byFolder.get(folder);
+            const fileCount = files.length;
+            const folderSize = files.reduce((s, d) => s + (d.size || 0), 0);
+            const sizeHuman = formatSize(folderSize);
+            const sectionId = 'hist-section-' + i;
+
+            let body = files.map(d => {
+                const dt = new Date(d.timestamp);
+                const dateStr = dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                const timeStr = dt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+                const fname = d.path ? d.path.split(/[/\\\\]/).pop() : 'Unknown';
+
+                // Determine file type
+                const ext = (d.path || '').toLowerCase();
+                const isVideo = ext.endsWith('.mp4') || ext.endsWith('.mov') || ext.endsWith('.avi') ||
+                    ext.endsWith('.mkv') || ext.endsWith('.m4v') || ext.endsWith('.wmv') ||
+                    ext.endsWith('.flv') || ext.endsWith('.webm') || ext.endsWith('.3gp');
+
+                const iconClass = isVideo ? 'video' : 'photo';
+                const iconSvg = isVideo ?
+                    '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>' :
+                    '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>';
+
+                let keptHtml = '';
+                if (d.kept_versions && d.kept_versions.length > 0) {
+                    const keptPath = d.kept_versions[0];
+                    const keptName = keptPath.split(/[/\\\\]/).pop();
+                    const keptFolder = getFolderFromPath(keptPath);
+                    const moreCount = d.kept_versions.length - 1;
+                    const moreText = moreCount > 0 ? ` (+${moreCount} more)` : '';
+
+                    keptHtml = `<div class="kept-info">
+                      <strong>✓ Kept Original:</strong> ${escapeHtml(keptName)}${moreText}<br>
+                      <small style="opacity:0.8">📁 ${escapeHtml(keptFolder)}</small>
                   </div>`;
-              }
-                
-              return `<div class="history-item">
-                <div style="flex:1">
+                }
+
+                return `<div class="history-item" data-file-type="${iconClass}">
+                <div class="history-item-icon ${iconClass}">${iconSvg}</div>
+                <div class="history-item-content">
                     <span class="hist-path" title="${escapeHtml(d.path)}">${escapeHtml(fname)}</span>
                     ${keptHtml}
                 </div>
-                <span class="hist-meta">${d.size_human||''}<br>${ts}</span>
+                <div class="hist-meta">
+                    <span class="hist-size">${d.size_human || ''}</span>
+                    <span class="hist-timestamp">${dateStr}<br>${timeStr}</span>
+                </div>
               </div>`;
-          }).join('');
-          
-          return `<div class="history-folder-section" data-hist-section="${sectionId}">
+            }).join('');
+
+            return `<div class="history-folder-section" data-hist-section="${sectionId}">
               <div class="history-folder-header" data-hist-toggle="${sectionId}">
                   <span class="hist-folder-toggle">&#9654;</span>
-                  <span class="hist-folder-label">${escapeHtml(folder)} &middot; ${fileCount} file(s) &middot; ${sizeHuman}</span>
+                  <span class="hist-folder-label">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:6px">
+                          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                      </svg>
+                      ${escapeHtml(folder)} &middot; ${fileCount} file(s) &middot; ${sizeHuman}
+                  </span>
               </div>
               <div class="history-folder-body collapsed" data-hist-body="${sectionId}">
                   ${body}
               </div>
           </div>`;
-      }).join('');
-  } catch (e) {
-      console.error("History load failed:", e);
-      el.innerHTML = `<div class="empty" style="color:#e74c3c"><p>Failed to load deletion history.</p></div>`;
-  }
+        }).join('');
+
+        // Add search and filter event listeners
+        setupHistoryFilters();
+    } catch (e) {
+        console.error("History load failed:", e);
+        el.innerHTML = `<div class="empty" style="color:#e74c3c"><p>Failed to load deletion history.</p></div>`;
+    }
 }
+
+function setupHistoryFilters() {
+    const searchInput = document.getElementById('history-search');
+    const filterSelect = document.getElementById('history-filter');
+    const sortSelect = document.getElementById('history-sort');
+
+    if (!searchInput || !filterSelect || !sortSelect) return;
+
+    const applyFilters = () => {
+        const searchTerm = searchInput.value.toLowerCase();
+        const filterType = filterSelect.value;
+        const sortType = sortSelect.value;
+
+        const sections = document.querySelectorAll('.history-folder-section');
+        sections.forEach(section => {
+            const items = section.querySelectorAll('.history-item');
+            let visibleCount = 0;
+
+            items.forEach(item => {
+                const path = item.querySelector('.hist-path').textContent.toLowerCase();
+                const fileType = item.getAttribute('data-file-type');
+
+                let show = true;
+
+                // Apply search filter
+                if (searchTerm && !path.includes(searchTerm)) {
+                    show = false;
+                }
+
+                // Apply type filter
+                if (filterType === 'images' && fileType !== 'photo') show = false;
+                if (filterType === 'videos' && fileType !== 'video') show = false;
+
+                item.style.display = show ? 'flex' : 'none';
+                if (show) visibleCount++;
+            });
+
+            // Hide section if no visible items
+            section.style.display = visibleCount > 0 ? 'block' : 'none';
+        });
+    };
+
+    searchInput.addEventListener('input', applyFilters);
+    filterSelect.addEventListener('change', applyFilters);
+    sortSelect.addEventListener('change', applyFilters);
+}
+
 
 // ----- Empty Folders -----
 const selectedEmptyFolders = new Set();
